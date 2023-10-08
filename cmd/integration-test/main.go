@@ -37,11 +37,10 @@ func send(s *client.Simple) (sum int64, err error) {
 	var b bytes.Buffer
 	for i := 0; i <= maxN; i++ {
 		sum += int64(i)
-		fprintf, err := fmt.Fprintf(&b, "%d\n", i)
+		fmt.Fprintf(&b, "%d\n", i)
 		if err != nil {
 			return 0, err
 		}
-		fmt.Printf("%d", fprintf)
 
 		if b.Len() >= maxBufferSize {
 			if err := s.Send(b.Bytes()); err != nil {
