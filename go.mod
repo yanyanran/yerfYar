@@ -2,12 +2,17 @@ module yerfYar
 
 go 1.19
 
+require github.com/valyala/fasthttp v1.50.0
+
 require (
 	9fans.net/go v0.0.0-20181112161441-237454027057 // indirect
 	github.com/BurntSushi/toml v1.2.1 // indirect
+	github.com/andybalholm/brotli v1.0.5 // indirect
 	github.com/google/go-cmp v0.5.9 // indirect
+	github.com/klauspost/compress v1.17.0 // indirect
 	github.com/rogpeppe/godef v1.1.2 // indirect
 	github.com/sergi/go-diff v1.1.0 // indirect
+	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	golang.org/x/exp v0.0.0-20220722155223-a9213eeb770e // indirect
 	golang.org/x/exp/typeparams v0.0.0-20221212164502-fae10dda9338 // indirect
 	golang.org/x/mod v0.12.0 // indirect

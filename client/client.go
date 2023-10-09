@@ -1,87 +1,75 @@
-package client
+package server
 
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
 )
 
 const defaultScratchSize = 64 * 1024
 
 var errBufToolSmall = errors.New("buffer is too small to fit a single message")
 
-// Simple represents an instance of client connected to a set of yerkYar servers.
 type Simple struct {
 	addrs []string
 
-	buf     bytes.Buffer
-	restBuf bytes.Buffer
+	cl *http.Client
 }
 
-// NewSimple create a new client for the yerkYar server.
 func NewSimple(addrs []string) *Simple {
 	return &Simple{
 		addrs: addrs,
+		cl:    &http.Client{},
 	}
 }
 
-// Send sends the messages to the yerkYar servers.
 func (s *Simple) Send(msgs []byte) error {
-	_, err := s.buf.Write(msgs)
-	return err
+	res, err := s.cl.Post(s.addrs[0]+"/write", "application/octet-stream", bytes.NewReader(msgs))
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		var b bytes.Buffer
+		io.Copy(&b, res.Body)
+		return fmt.Errorf("http code %d, %s", res.StatusCode, b.String())
+	}
+
+	io.Copy(io.Discard, res.Body)
+	return nil
 }
 
-// Receive will either wait for new messages or return an error in case something goes wrong.
-// The scratch buffer can be used to read the data.
 func (s *Simple) Receive(scratch []byte) ([]byte, error) {
 	if scratch == nil {
 		scratch = make([]byte, defaultScratchSize)
 	}
 
-	startOff := 0
+	res, err := s.cl.Get(s.addrs[0] + "/read")
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
 
-	if s.restBuf.Len() > 0 {
-		if s.restBuf.Len() >= len(scratch) {
-			return nil, errBufToolSmall
-		}
-
-		n, err := s.restBuf.Read(scratch)
-		if err != nil {
-			return nil, err
-		}
-
-		s.restBuf.Reset()
-		startOff += n
+	if res.StatusCode != http.StatusOK {
+		var b bytes.Buffer
+		io.Copy(&b, res.Body)
+		return nil, fmt.Errorf("http code %d, %s", res.StatusCode, b.String())
 	}
 
-	n, err := s.buf.Read(scratch[startOff:])
+	b := bytes.NewBuffer(scratch[0:0])
+
+	_, err = io.Copy(b, res.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	truncated, rest, err := cutToLastMessage(scratch[0 : n+startOff])
-	if err != nil {
-		return nil, err
+	// 读0个字节但没错，意味着按照约定文件结束
+	if b.Len() == 0 {
+		return nil, io.EOF
 	}
 
-	s.restBuf.Reset()
-	s.restBuf.Write(rest)
-
-	return truncated, nil
-}
-
-func cutToLastMessage(res []byte) (truncated []byte, rest []byte, err error) {
-	n := len(res)
-	if n == 0 {
-		return res, nil, nil
-	}
-
-	if res[n-1] == '\n' {
-		return res, nil, nil
-	}
-
-	lastPos := bytes.LastIndexByte(res, '\n')
-	if lastPos < 0 {
-		return nil, nil, errBufToolSmall
-	}
-	return res[0 : lastPos+1], res[lastPos+1:], nil
+	return b.Bytes(), nil
 }
