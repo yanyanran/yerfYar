@@ -4,16 +4,22 @@ import (
 	"fmt"
 	"github.com/valyala/fasthttp"
 	"io"
-	"yerfYar/server"
 )
 
 const defaultBufSize = 512 * 1024
 
-type Server struct {
-	s *server.InMemory
+// Storage 为后端存储定义了一个接口 (磁盘、内存或其他类型的存储)
+type Storage interface {
+	Write(msgs []byte) error
+	Read(off uint64, maxSize uint64, w io.Writer) error
+	Ack() error
 }
 
-func NewServer(s *server.InMemory) *Server {
+type Server struct {
+	s Storage
+}
+
+func NewServer(s Storage) *Server {
 	return &Server{s: s}
 }
 

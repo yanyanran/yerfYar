@@ -6,7 +6,9 @@ import (
 	"io"
 )
 
-var errBufTooSmall = errors.New("buffer is too small to fit a single message")
+var (
+	errBufTooSmall = errors.New("buffer is too small to fit a single message")
+)
 
 type InMemory struct {
 	buf []byte
@@ -20,7 +22,7 @@ func (s *InMemory) Write(msgs []byte) error {
 func (s *InMemory) Read(off uint64, maxSize uint64, w io.Writer) error {
 	maxOff := uint64(len(s.buf))
 
-	if off > maxOff {
+	if off >= maxOff {
 		return nil
 	} else if off+maxSize >= maxOff {
 		w.Write(s.buf[off:])
@@ -40,7 +42,7 @@ func (s *InMemory) Read(off uint64, maxSize uint64, w io.Writer) error {
 }
 
 func (s *InMemory) Ack() error {
-	s.buf = nil
+	s.buf = s.buf[0:0]
 	return nil
 }
 
@@ -61,5 +63,4 @@ func cutToLastMessage(res []byte) (truncated []byte, rest []byte, err error) {
 	}
 
 	return res[0 : lastPos+1], res[lastPos+1:], nil
-
 }
