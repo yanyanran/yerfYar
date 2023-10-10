@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"github.com/valyala/fasthttp"
 	"io"
 	"yerfYar/server"
@@ -22,6 +23,9 @@ func (s *Server) handler(ctx *fasthttp.RequestCtx) {
 		s.writeHandler(ctx)
 	case "/read":
 		s.readHandler(ctx)
+	case "/ack":
+		s.ackHandler(ctx)
+
 	default:
 		ctx.WriteString("hello yerfYar!")
 	}
@@ -29,23 +33,40 @@ func (s *Server) handler(ctx *fasthttp.RequestCtx) {
 
 func (s *Server) writeHandler(ctx *fasthttp.RequestCtx) {
 	ctx.WriteString("you chose to write...")
-	if err := s.s.Send(ctx.Request.Body()); err != nil {
+	if err := s.s.Write(ctx.Request.Body()); err != nil {
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		ctx.WriteString(err.Error())
+	}
+}
+
+func (s *Server) ackHandler(ctx *fasthttp.RequestCtx) {
+	if err := s.s.Ack(); err != nil {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
 	}
 }
 
 func (s *Server) readHandler(ctx *fasthttp.RequestCtx) {
-	ctx.WriteString("you chose to read...")
-	buf := make([]byte, defaultBufSize)
+	off, err := ctx.QueryArgs().GetUint("off")
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString(fmt.Sprintf("bad `off` GET param: %v", err))
+		return
+	}
 
-	res, err := s.s.Receive(buf)
+	maxSize, err := ctx.QueryArgs().GetUint("maxSize")
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString(fmt.Sprintf("bad `maxSize` GET param: %v", err))
+		return
+	}
+
+	err = s.s.Read(uint64(off), uint64(maxSize), ctx)
 	if err != nil && err != io.EOF {
-		ctx.SetStatusCode(fasthttp.StatusInternalServerError) // 设置HTTP响应状态码为500表示server内部发生错误
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
 		return
 	}
-	ctx.Write(res)
 }
 
 func (s *Server) Serve() error {

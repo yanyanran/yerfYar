@@ -3,49 +3,45 @@ package server
 import (
 	"bytes"
 	"errors"
+	"io"
 )
 
 var errBufTooSmall = errors.New("buffer is too small to fit a single message")
 
 type InMemory struct {
-	buf     bytes.Buffer
-	restBuf bytes.Buffer
+	buf []byte
 }
 
-func (s *InMemory) Send(msgs []byte) error {
-	_, err := s.buf.Write(msgs)
-	return err
+func (s *InMemory) Write(msgs []byte) error {
+	s.buf = append(s.buf, msgs...)
+	return nil
 }
 
-func (s *InMemory) Receive(scratch []byte) ([]byte, error) {
-	startOff := 0
+func (s *InMemory) Read(off uint64, maxSize uint64, w io.Writer) error {
+	maxOff := uint64(len(s.buf))
 
-	if s.restBuf.Len() > 0 { // restBuf缓冲区存在未处理数据
-		if s.restBuf.Len() >= len(scratch) {
-			return nil, errBufTooSmall
-		}
-		n, err := s.restBuf.Read(scratch)
-		if err != nil {
-			return nil, err
-		}
-		s.restBuf.Reset()
-		startOff += n
+	if off > maxOff {
+		return nil
+	} else if off+maxSize >= maxOff {
+		w.Write(s.buf[off:])
+		return nil
 	}
 
-	n, err := s.buf.Read(scratch[startOff:])
+	truncated, _, err := cutToLastMessage(s.buf[off : off+maxSize])
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	truncated, rest, err := cutToLastMessage(scratch[0 : n+startOff])
-	if err != nil {
-		return nil, err
+	if _, err := w.Write(truncated); err != nil {
+		return err
 	}
 
-	s.restBuf.Reset()
-	s.restBuf.Write(rest)
+	return nil
+}
 
-	return truncated, nil
+func (s *InMemory) Ack() error {
+	s.buf = nil
+	return nil
 }
 
 func cutToLastMessage(res []byte) (truncated []byte, rest []byte, err error) {

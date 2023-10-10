@@ -1,21 +1,19 @@
-package server
+package client
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 )
 
 const defaultScratchSize = 64 * 1024
 
-var errBufToolSmall = errors.New("buffer is too small to fit a single message")
-
 type Simple struct {
-	addrs []string
-
-	cl *http.Client
+	addrs  []string
+	cl     *http.Client
+	offset uint64
 }
 
 func NewSimple(addrs []string) *Simple {
@@ -47,7 +45,11 @@ func (s *Simple) Receive(scratch []byte) ([]byte, error) {
 		scratch = make([]byte, defaultScratchSize)
 	}
 
-	res, err := s.cl.Get(s.addrs[0] + "/read")
+	addrIndex := rand.Intn(len(s.addrs))
+	addr := s.addrs[addrIndex]
+	readURL := fmt.Sprintf("%s/read?off=%d&maxSize=%d", addr, s.offset, len(scratch))
+
+	res, err := s.cl.Get(readURL)
 	if err != nil {
 		return nil, err
 	}
@@ -58,9 +60,7 @@ func (s *Simple) Receive(scratch []byte) ([]byte, error) {
 		io.Copy(&b, res.Body)
 		return nil, fmt.Errorf("http code %d, %s", res.StatusCode, b.String())
 	}
-
 	b := bytes.NewBuffer(scratch[0:0])
-
 	_, err = io.Copy(b, res.Body)
 	if err != nil {
 		return nil, err
@@ -68,8 +68,31 @@ func (s *Simple) Receive(scratch []byte) ([]byte, error) {
 
 	// 读0个字节但没错，意味着按照约定文件结束
 	if b.Len() == 0 {
+		if err := s.ackCurrentChunk(addr); err != nil {
+			return nil, err
+
+		}
 		return nil, io.EOF
 	}
 
+	s.offset += uint64(b.Len())
 	return b.Bytes(), nil
+}
+
+func (s *Simple) ackCurrentChunk(addr string) error {
+	res, err := s.cl.Get(addr + "/ack")
+	if err != nil {
+		return err
+	}
+
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		var b bytes.Buffer
+		io.Copy(&b, res.Body)
+		return fmt.Errorf("http code %d, %s", res.StatusCode, b.String())
+	}
+
+	io.Copy(io.Discard, res.Body)
+	return nil
 }
