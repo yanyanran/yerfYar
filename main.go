@@ -4,8 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"os"
-	"yerfYar/server"
 	"yerfYar/web"
 )
 
@@ -19,21 +17,21 @@ func main() {
 	flag.Parse()
 	var backend web.Storage
 
-	if *inmem {
-		backend = &server.InMemory{}
-	} else {
-		if *filename == "" {
-			log.Fatalf("The flag `--filename` must be provided")
-		}
-
-		fp, err := os.OpenFile(*filename, os.O_CREATE|os.O_RDWR, 0666)
-		if err != nil {
-			log.Fatalf("Could not create file %q: %s", *filename, err)
-		}
-		defer fp.Close()
-
-		backend = server.NewOnDisk(fp)
-	}
+	//if *inmem {
+	//	backend = &server.InMemory{}
+	//} else {
+	//	if *filename == "" {
+	//		log.Fatalf("The flag `--filename` must be provided")
+	//	}
+	//
+	//	fp, err := os.OpenFile(*filename, os.O_CREATE|os.O_RDWR, 0666)
+	//	if err != nil {
+	//		log.Fatalf("Could not create file %q: %s", *filename, err)
+	//	}
+	//	defer fp.Close()
+	//
+	//	backend = server.NewOnDisk(fp)
+	//}
 
 	s := web.NewServer(backend, *port)
 	log.Printf("Listening connections")

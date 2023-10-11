@@ -1,18 +1,20 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/valyala/fasthttp"
 	"io"
+	"yerfYar/server"
 )
 
 const defaultBufSize = 512 * 1024
 
-// Storage 为后端存储定义了一个接口 (磁盘、内存或其他类型的存储)
 type Storage interface {
 	Write(msgs []byte) error
-	Read(off uint64, maxSize uint64, w io.Writer) error
-	Ack() error
+	Read(chunk string, off uint64, maxSize uint64, w io.Writer) error
+	Ack(chunk string) error
+	ListChunks() ([]server.Chunk, error)
 }
 
 type Server struct {
@@ -35,14 +37,14 @@ func (s *Server) handler(ctx *fasthttp.RequestCtx) {
 		s.readHandler(ctx)
 	case "/ack":
 		s.ackHandler(ctx)
-
+	case "/listChunks":
+		s.listChunksHandler(ctx)
 	default:
 		ctx.WriteString("hello yerfYar!")
 	}
 }
 
 func (s *Server) writeHandler(ctx *fasthttp.RequestCtx) {
-	ctx.WriteString("you chose to write...")
 	if err := s.s.Write(ctx.Request.Body()); err != nil {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
@@ -50,7 +52,14 @@ func (s *Server) writeHandler(ctx *fasthttp.RequestCtx) {
 }
 
 func (s *Server) ackHandler(ctx *fasthttp.RequestCtx) {
-	if err := s.s.Ack(); err != nil {
+	chunk := ctx.QueryArgs().Peek("chunk")
+	if len(chunk) == 0 {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString(fmt.Sprintf("错误的 `chunk` GET参数：必须提供chunk名称"))
+		return
+	}
+
+	if err := s.s.Ack(string(chunk)); err != nil {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
 	}
@@ -60,7 +69,7 @@ func (s *Server) readHandler(ctx *fasthttp.RequestCtx) {
 	off, err := ctx.QueryArgs().GetUint("off")
 	if err != nil {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		ctx.WriteString(fmt.Sprintf("bad `off` GET param: %v", err))
+		ctx.WriteString(fmt.Sprintf("错误的 `off` GET参数: %v", err))
 		return
 	}
 
@@ -71,12 +80,32 @@ func (s *Server) readHandler(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	err = s.s.Read(uint64(off), uint64(maxSize), ctx)
+	chunk := ctx.QueryArgs().Peek("chunk")
+	if len(chunk) == 0 {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString(fmt.Sprintf("错误的 `chunk` GET参数: 必须提供chunk名称"))
+		return
+	}
+
+	err = s.s.Read(string(chunk), uint64(off), uint64(maxSize), ctx)
 	if err != nil && err != io.EOF {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
 		return
 	}
+}
+
+func (s *Server) listChunksHandler(ctx *fasthttp.RequestCtx) {
+	chunks, err := s.s.ListChunks()
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		ctx.WriteString(err.Error())
+		return
+	}
+
+	// 将chunks以JSON格式编码，写入到HTTP响应体中
+	// chunk列表的JSON数据将作为响应返回给客户端
+	json.NewEncoder(ctx).Encode(chunks)
 }
 
 func (s *Server) Serve() error {

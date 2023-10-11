@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"go/build"
 	"io"
@@ -40,9 +41,10 @@ func runTest() error {
 	}
 
 	log.Printf("编译yerfYar....")
-	err := exec.Command("go", "install", "-v", "github.com/yanyanran/yerfYar").Run()
+	out, err := exec.Command("go", "install", "-v", "github.com/yanyanran/yerfYar").CombinedOutput()
 	if err != nil {
 		log.Printf("Failed to build: %v", err)
+		return fmt.Errorf("compilation failed: %v (out: %s)", err, string(out))
 	}
 
 	// TODO: 随机端口
@@ -54,7 +56,9 @@ func runTest() error {
 
 	log.Printf("Running yerfYar on port %d", port)
 
-	cmd := exec.Command(goPath+"/bin/yerfYar", "-filename="+dbPath, fmt.Sprintf("-port=%d", port))
+	cmd := exec.Command(goPath+"/bin/yerfYar", "-inmem", "-filename="+dbPath, fmt.Sprintf("-port=%d", port))
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	err = cmd.Start()
 	if err != nil {
 		return err
@@ -62,10 +66,11 @@ func runTest() error {
 	defer cmd.Process.Kill()
 
 	log.Printf("Waiting for the port localhost:%d to open", port)
-	for {
-		timeout := time.Millisecond * 100
+	for i := 0; i <= 100; i++ {
+		timeout := time.Millisecond * 50
 		conn, err := net.DialTimeout("tcp", net.JoinHostPort("localhost", fmt.Sprint(port)), timeout)
 		if err != nil {
+			time.Sleep(timeout)
 			continue
 		}
 		conn.Close()
@@ -147,7 +152,7 @@ func receive(s *client.Simple) (sum int64, err error) {
 
 	for {
 		res, err := s.Receive(buf)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return sum, nil
 		} else if err != nil {
 			return 0, err
