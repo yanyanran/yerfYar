@@ -76,6 +76,11 @@ func (s *Simple) Receive(scratch []byte) ([]byte, error) {
 	// 读0个字节但没错，意味着按照约定文件结束
 	if b.Len() == 0 {
 		if !s.curChunk.Complete {
+			if err := s.updateCurrentChunkCompleteStatus(addr); err != nil {
+				return nil, fmt.Errorf("updateCurrentChunkCompleteStatus: %v", err)
+			}
+		}
+		if !s.curChunk.Complete {
 			return nil, io.EOF
 		}
 
@@ -142,6 +147,22 @@ func (s *Simple) listChunks(addr string) ([]server.Chunk, error) {
 	}
 
 	return res, nil
+}
+
+func (s *Simple) updateCurrentChunkCompleteStatus(addr string) error {
+	chunks, err := s.listChunks(addr)
+	if err != nil {
+		return fmt.Errorf("listChunks failed: %v", err)
+	}
+
+	for _, c := range chunks {
+		if c.Name == s.curChunk.Name {
+			s.curChunk = c
+			return nil
+		}
+	}
+
+	return nil
 }
 
 func (s *Simple) ackCurrentChunk(addr string) error {
