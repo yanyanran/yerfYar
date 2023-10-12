@@ -6,6 +6,7 @@ import (
 	"github.com/yanyanran/yerfYar/client"
 	"go/build"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -55,6 +56,8 @@ func runTest() error {
 	os.RemoveAll(dbPath)
 	os.Mkdir(dbPath, 0777)
 
+	ioutil.WriteFile("/tmp/yerfYar/chunk1", []byte("12345\n"), 0666)
+
 	log.Printf("Running yerfYar on port %d", port)
 
 	cmd := exec.Command(goPath+"/bin/yerfYar", "-dirname="+dbPath, fmt.Sprintf("-port=%d", port))
@@ -92,8 +95,9 @@ func runTest() error {
 		return fmt.Errorf("receive: %v", err)
 	}
 
+	want += 12345 // 已存在的chunk的内容
 	if want != got {
-		return fmt.Errorf("the expected sum %d is not equal to the actual sum %d", want, got)
+		return fmt.Errorf("the expected sum %d is not equal to the actual sum %d (delivered %1.f%%)", want, got, (float64(got)/float64(want))*100)
 	}
 
 	return nil

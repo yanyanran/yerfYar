@@ -10,20 +10,12 @@ import (
 
 const defaultBufSize = 512 * 1024
 
-// Storage ：InMemory, onDisk
-type Storage interface {
-	Write(msgs []byte) error
-	Read(chunk string, off uint64, maxSize uint64, w io.Writer) error
-	Ack(chunk string) error
-	ListChunks() ([]server.Chunk, error)
-}
-
 type Server struct {
-	s    Storage
+	s    *server.OnDisk
 	port uint
 }
 
-func NewServer(s Storage, port uint) *Server {
+func NewServer(s *server.OnDisk, port uint) *Server {
 	return &Server{
 		s:    s,
 		port: port,
