@@ -1,4 +1,4 @@
-module yerfYar
+module github.com/yanyanran/yerfYar
 
 go 1.19
 

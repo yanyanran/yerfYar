@@ -3,35 +3,40 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/yanyanran/yerfYar/server"
+	"github.com/yanyanran/yerfYar/web"
 	"log"
-	"yerfYar/web"
+	"os"
+	"path/filepath"
 )
 
 var (
-	filename = flag.String("filename", "", "The filename where to put all the data")
-	inmem    = flag.Bool("inmem", false, "Whether or not use in-memory storage instead of a disk-based one")
-	port     = flag.Uint("port", 8080, "Network port to listen on")
+	dirname = flag.String("dirname", "", "The directory name where to put all the data")
+	inmem   = flag.Bool("inmem", false, "Whether or not use in-memory storage instead of a disk-based one")
+	port    = flag.Uint("port", 8080, "Network port to listen on")
 )
 
 func main() {
 	flag.Parse()
 	var backend web.Storage
 
-	//if *inmem {
-	//	backend = &server.InMemory{}
-	//} else {
-	//	if *filename == "" {
-	//		log.Fatalf("The flag `--filename` must be provided")
-	//	}
-	//
-	//	fp, err := os.OpenFile(*filename, os.O_CREATE|os.O_RDWR, 0666)
-	//	if err != nil {
-	//		log.Fatalf("Could not create file %q: %s", *filename, err)
-	//	}
-	//	defer fp.Close()
-	//
-	//	backend = server.NewOnDisk(fp)
-	//}
+	if *inmem {
+		backend = &server.InMemory{}
+	} else {
+		if *dirname == "" {
+			log.Fatalf("The flag `--dirname` must be provided")
+		}
+
+		filename := filepath.Join(*dirname, "write_test")
+		fp, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
+		if err != nil {
+			log.Fatalf("Could not create test file %q: %s", filename, err)
+		}
+		fp.Close()
+		os.Remove(fp.Name()) // 删除write_test文件
+
+		backend = server.NewOnDisk(*dirname)
+	}
 
 	s := web.NewServer(backend, *port)
 	log.Printf("Listening connections")

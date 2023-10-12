@@ -4,12 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/valyala/fasthttp"
+	"github.com/yanyanran/yerfYar/server"
 	"io"
-	"yerfYar/server"
 )
 
 const defaultBufSize = 512 * 1024
 
+// Storage ：InMemory, onDisk
 type Storage interface {
 	Write(msgs []byte) error
 	Read(chunk string, off uint64, maxSize uint64, w io.Writer) error

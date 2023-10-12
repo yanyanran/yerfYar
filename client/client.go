@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/yanyanran/yerfYar/server"
 	"io"
 	"math/rand"
 	"net/http"
-	"yerfYar/server"
 )
 
 const defaultScratchSize = 64 * 1024

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"github.com/yanyanran/yerfYar/client"
 	"go/build"
 	"io"
 	"log"
@@ -12,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"yerfYar/client"
 )
 
 const (
@@ -51,12 +51,13 @@ func runTest() error {
 	port := 8080 // "test" in l33t
 
 	// TODO: 使数据库路径随机
-	dbPath := "/tmp/yerfYar.db"
-	os.Remove(dbPath)
+	dbPath := "/tmp/yerfYar"
+	os.RemoveAll(dbPath)
+	os.Mkdir(dbPath, 0777)
 
 	log.Printf("Running yerfYar on port %d", port)
 
-	cmd := exec.Command(goPath+"/bin/yerfYar", "-inmem", "-filename="+dbPath, fmt.Sprintf("-port=%d", port))
+	cmd := exec.Command(goPath+"/bin/yerfYar", "-dirname="+dbPath, fmt.Sprintf("-port=%d", port))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	err = cmd.Start()
