@@ -21,11 +21,13 @@ var filenameRegexp = regexp.MustCompile("^chunk([0-9]+)$") // 匹配以"chunk"�
 type OnDisk struct {
 	dirname string
 
-	sync.RWMutex
+	writeMu       sync.Mutex
 	lastChunk     string
 	lastChunkSize uint64
 	lastChunkIdx  uint64
-	fps           map[string]*os.File
+
+	fpsMu sync.Mutex
+	fps   map[string]*os.File // 缓存已打开的文件描述符，以便在需要读或写文件块时可快速访问
 }
 
 func NewOnDisk(dirname string) (*OnDisk, error) {
@@ -67,8 +69,8 @@ func (s *OnDisk) initLastChunkIdx(dirname string) error {
 }
 
 func (s *OnDisk) Write(msgs []byte) error {
-	s.Lock()
-	defer s.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	if s.lastChunk == "" || (s.lastChunkSize+uint64(len(msgs)) > maxFileChunkSize) {
 		s.lastChunk = fmt.Sprintf("chunk%d", s.lastChunkIdx)
@@ -88,6 +90,9 @@ func (s *OnDisk) Write(msgs []byte) error {
 
 // 检查给定chunk的文件描述符是否已映射
 func (s *OnDisk) getFileDescriptor(chunk string) (*os.File, error) {
+	s.fpsMu.Lock()
+	defer s.fpsMu.Unlock()
+
 	fp, ok := s.fps[chunk]
 	if ok {
 		return fp, nil
@@ -107,11 +112,21 @@ func (s *OnDisk) getFileDescriptor(chunk string) (*os.File, error) {
 	return fp, nil
 }
 
+func (s *OnDisk) forgetFileDescriptor(chunk string) {
+	s.fpsMu.Lock()
+	defer s.fpsMu.Unlock()
+
+	fp, ok := s.fps[chunk]
+	if !ok {
+		return
+	}
+
+	fp.Close()
+	delete(s.fps, chunk)
+}
+
 // Read 读文件指定offset到byte切片中，然后写到对应writer中去
 func (s *OnDisk) Read(chunk string, offset uint64, maxSize uint64, w io.Writer) error {
-	s.Lock()
-	defer s.Unlock()
-
 	chunk = filepath.Clean(chunk)
 	_, err := os.Stat(filepath.Join(s.dirname, chunk))
 	if err != nil {
@@ -164,12 +179,16 @@ func cutToLastMessage(res []byte) (truncated []byte, rest []byte, err error) {
 	return res[0 : lastPos+1], res[lastPos+1:], nil
 }
 
+func (s *OnDisk) isLastChunk(chunk string) bool {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	return chunk == s.lastChunk
+}
+
 // Ack 将当前消息块标记为完成并删除其内容
 func (s *OnDisk) Ack(chunk string, size int64) error {
-	s.Lock()
-	defer s.Unlock()
-
-	if chunk == s.lastChunk {
+	if s.isLastChunk(chunk) {
 		return fmt.Errorf("could not delete incomplete chunk %q", chunk)
 	}
 
@@ -188,11 +207,7 @@ func (s *OnDisk) Ack(chunk string, size int64) error {
 		return fmt.Errorf("removing %q: %v", chunk, err)
 	}
 
-	fp, ok := s.fps[chunk]
-	if ok {
-		fp.Close()
-	}
-	delete(s.fps, chunk)
+	s.forgetFileDescriptor(chunk)
 	return nil
 }
 
