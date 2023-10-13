@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/yanyanran/yerfYar/protocal"
 	"io"
 	"os"
 	"path/filepath"
@@ -97,6 +98,11 @@ func (s *OnDisk) getFileDescriptor(chunk string) (*os.File, error) {
 		return nil, fmt.Errorf("create file %q: %s", fp.Name(), err)
 	}
 
+	_, err = fp.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, fmt.Errorf("seek file %q until the end: %v", fp.Name(), err)
+	}
+
 	s.fps[chunk] = fp
 	return fp, nil
 }
@@ -159,7 +165,7 @@ func cutToLastMessage(res []byte) (truncated []byte, rest []byte, err error) {
 }
 
 // Ack 将当前消息块标记为完成并删除其内容
-func (s *OnDisk) Ack(chunk string) error {
+func (s *OnDisk) Ack(chunk string, size int64) error {
 	s.Lock()
 	defer s.Unlock()
 
@@ -169,9 +175,13 @@ func (s *OnDisk) Ack(chunk string) error {
 
 	chunkFilename := filepath.Join(s.dirname, chunk)
 
-	_, err := os.Stat(chunkFilename)
+	fi, err := os.Stat(chunkFilename)
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", chunk, err)
+	}
+
+	if fi.Size() > size {
+		return fmt.Errorf("文件未完全处理：提供的已处理大小 %d 小于 Chunk 文件大小 %d", size, fi.Size())
 	}
 
 	if err := os.Remove(chunkFilename); err != nil {
@@ -186,8 +196,8 @@ func (s *OnDisk) Ack(chunk string) error {
 	return nil
 }
 
-func (s *OnDisk) ListChunks() ([]Chunk, error) {
-	var res []Chunk
+func (s *OnDisk) ListChunks() ([]protocal.Chunk, error) {
+	var res []protocal.Chunk
 
 	dis, err := os.ReadDir(s.dirname)
 	if err != nil {
@@ -195,9 +205,17 @@ func (s *OnDisk) ListChunks() ([]Chunk, error) {
 	}
 
 	for _, di := range dis {
-		c := Chunk{
+		fi, err := di.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return nil, fmt.Errorf("reading directory: %v", err)
+		}
+
+		c := protocal.Chunk{
 			Name:     di.Name(),
 			Complete: di.Name() != s.lastChunk,
+			Size:     uint64(fi.Size()),
 		}
 		res = append(res, c)
 	}

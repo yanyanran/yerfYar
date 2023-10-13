@@ -3,8 +3,9 @@ package client
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/yanyanran/yerfYar/server"
+	"github.com/yanyanran/yerfYar/protocal"
 	"io"
 	"math/rand"
 	"net/http"
@@ -12,10 +13,12 @@ import (
 
 const defaultScratchSize = 64 * 1024
 
+var errRetry = errors.New("please retry the request")
+
 type Simple struct {
 	addr     []string
 	cl       *http.Client
-	curChunk server.Chunk
+	curChunk protocal.Chunk
 	offset   uint64
 }
 
@@ -48,6 +51,16 @@ func (s *Simple) Receive(scratch []byte) ([]byte, error) {
 		scratch = make([]byte, defaultScratchSize)
 	}
 
+	for {
+		res, err := s.receive(scratch)
+		if err == errRetry {
+			continue
+		}
+		return res, nil
+	}
+}
+
+func (s *Simple) receive(scratch []byte) ([]byte, error) {
 	addrIndex := rand.Intn(len(s.addr))
 	addr := s.addr[addrIndex]
 	if err := s.updateCurrentChunk(addr); err != nil {
@@ -79,19 +92,29 @@ func (s *Simple) Receive(scratch []byte) ([]byte, error) {
 			if err := s.updateCurrentChunkCompleteStatus(addr); err != nil {
 				return nil, fmt.Errorf("updateCurrentChunkCompleteStatus: %v", err)
 			}
+
+			if !s.curChunk.Complete {
+				// 读到了最后且在请求间无新数据
+				if s.offset >= s.curChunk.Size {
+					return nil, io.EOF
+				}
+				// 在我们发送读取请求和chunk Complete间出现了新数据
+				return nil, errRetry
+			}
 		}
-		if !s.curChunk.Complete {
-			return nil, io.EOF
+
+		// 该chunk已被标记完成，但在发送读取请求和chunk Complete之间出现了新数据
+		if s.offset < s.curChunk.Size {
+			return nil, errRetry
 		}
 
 		if err := s.ackCurrentChunk(addr); err != nil {
 			return nil, fmt.Errorf("ack current chunk: %v", err)
-
 		}
 		// 需要读取下一个chunk，这样我们就不会返回空响应
-		s.curChunk = server.Chunk{}
+		s.curChunk = protocal.Chunk{}
 		s.offset = 0
-		return s.Receive(scratch)
+		return nil, errRetry
 	}
 
 	s.offset += uint64(b.Len())
@@ -123,7 +146,7 @@ func (s *Simple) updateCurrentChunk(addr string) error {
 	return nil
 }
 
-func (s *Simple) listChunks(addr string) ([]server.Chunk, error) {
+func (s *Simple) listChunks(addr string) ([]protocal.Chunk, error) {
 	listURL := fmt.Sprintf("%s/listChunks", addr)
 	resp, err := s.cl.Get(listURL)
 	if err != nil {
@@ -140,7 +163,7 @@ func (s *Simple) listChunks(addr string) ([]server.Chunk, error) {
 		return nil, fmt.Errorf("listChunks error: %s", body)
 	}
 
-	var res []server.Chunk
+	var res []protocal.Chunk
 	// 创建JSON解码器并将响应体的内容解码为res
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 		return nil, err
@@ -166,7 +189,7 @@ func (s *Simple) updateCurrentChunkCompleteStatus(addr string) error {
 }
 
 func (s *Simple) ackCurrentChunk(addr string) error {
-	res, err := s.cl.Get(fmt.Sprintf(addr+"/ack?chunk=%s", s.curChunk.Name))
+	res, err := s.cl.Get(fmt.Sprintf(addr+"/ack?chunk=%s&size=%d", s.curChunk.Name, s.offset))
 	if err != nil {
 		return err
 	}

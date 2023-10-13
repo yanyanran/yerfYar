@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -57,11 +58,11 @@ func runTest() error {
 	port := 8080 // "test" in l33t
 
 	// TODO: 使数据库路径随机
-	dbPath := "/tmp/yerfYar"
+	dbPath := filepath.Join(os.TempDir(), "yerfYar")
 	os.RemoveAll(dbPath)
 	os.Mkdir(dbPath, 0777)
 
-	ioutil.WriteFile("/tmp/yerfYar/chunk1", []byte("12345\n"), 0666)
+	ioutil.WriteFile(filepath.Join(dbPath, "chunk1"), []byte("12345\n"), 0666)
 
 	log.Printf("Running yerfYar on port %d", port)
 

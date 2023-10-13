@@ -8,8 +8,6 @@ import (
 	"io"
 )
 
-const defaultBufSize = 512 * 1024
-
 type Server struct {
 	s    *server.OnDisk
 	port uint
@@ -48,11 +46,17 @@ func (s *Server) ackHandler(ctx *fasthttp.RequestCtx) {
 	chunk := ctx.QueryArgs().Peek("chunk")
 	if len(chunk) == 0 {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		ctx.WriteString(fmt.Sprintf("错误的 `chunk` GET参数：必须提供chunk名称"))
+		ctx.WriteString("错误的 `chunk` GET参数：必须提供chunk名称")
 		return
 	}
 
-	if err := s.s.Ack(string(chunk)); err != nil {
+	size, err := ctx.QueryArgs().GetUint("size")
+	if err != nil {
+		ctx.WriteString(fmt.Sprintf("错误的 `chunk` GET参数：%v", err))
+		return
+	}
+
+	if err := s.s.Ack(string(chunk), int64(size)); err != nil {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
 	}
@@ -76,7 +80,7 @@ func (s *Server) readHandler(ctx *fasthttp.RequestCtx) {
 	chunk := ctx.QueryArgs().Peek("chunk")
 	if len(chunk) == 0 {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		ctx.WriteString(fmt.Sprintf("错误的 `chunk` GET参数: 必须提供chunk名称"))
+		ctx.WriteString("错误的 `chunk` GET参数: 必须提供chunk名称")
 		return
 	}
 
