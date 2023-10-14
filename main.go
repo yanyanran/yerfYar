@@ -2,12 +2,8 @@ package main
 
 import (
 	"flag"
-	"fmt"
-	"github.com/yanyanran/yerfYar/server"
-	"github.com/yanyanran/yerfYar/web"
+	"github.com/yanyanran/yerfYar/integration"
 	"log"
-	"os"
-	"path/filepath"
 )
 
 var (
@@ -22,24 +18,7 @@ func main() {
 		log.Fatalf("The flag `--dirname` must be provided")
 	}
 
-	filename := filepath.Join(*dirname, "write_test")
-	fp, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
-	if err != nil {
-		log.Fatalf("Could not create test file %q: %s", filename, err)
-	}
-	fp.Close()
-	os.Remove(fp.Name()) // 删除write_test文件
-
-	backend, err := server.NewOnDisk(*dirname)
-	if err != nil {
-		log.Fatalf("Could not initialise on-disk backend: %v", err)
-	}
-
-	s := web.NewServer(backend, *port)
-	log.Printf("Listening connections")
-
-	err = s.Serve()
-	if err != nil {
-		fmt.Printf(err.Error())
+	if err := integration.InitAndServe(*dirname, *port); err != nil {
+		log.Fatalf("InitAndServe failed: %v", err)
 	}
 }

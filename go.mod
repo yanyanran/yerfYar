@@ -10,6 +10,7 @@ require (
 	github.com/andybalholm/brotli v1.0.5 // indirect
 	github.com/google/go-cmp v0.5.9 // indirect
 	github.com/klauspost/compress v1.17.0 // indirect
+	github.com/phayes/freeport v0.0.0-20220201140144-74d24b5ae9f5 // indirect
 	github.com/rogpeppe/godef v1.1.2 // indirect
 	github.com/sergi/go-diff v1.1.0 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect

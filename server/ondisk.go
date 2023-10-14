@@ -78,7 +78,7 @@ func (s *OnDisk) Write(msgs []byte) error {
 		s.lastChunkIdx++
 	}
 
-	fp, err := s.getFileDescriptor(s.lastChunk)
+	fp, err := s.getFileDescriptor(s.lastChunk, true)
 	if err != nil {
 		return err
 	}
@@ -89,7 +89,7 @@ func (s *OnDisk) Write(msgs []byte) error {
 }
 
 // 检查给定chunk的文件描述符是否已映射
-func (s *OnDisk) getFileDescriptor(chunk string) (*os.File, error) {
+func (s *OnDisk) getFileDescriptor(chunk string, write bool) (*os.File, error) {
 	s.fpsMu.Lock()
 	defer s.fpsMu.Unlock()
 
@@ -98,14 +98,15 @@ func (s *OnDisk) getFileDescriptor(chunk string) (*os.File, error) {
 		return fp, nil
 	}
 
-	fp, err := os.OpenFile(filepath.Join(s.dirname, chunk), os.O_CREATE|os.O_RDWR, 0666)
-	if err != nil {
-		return nil, fmt.Errorf("create file %q: %s", fp.Name(), err)
+	fl := os.O_RDONLY
+	if write {
+		fl = os.O_CREATE | os.O_RDWR | os.O_EXCL
 	}
 
-	_, err = fp.Seek(0, io.SeekEnd)
+	filename := filepath.Join(s.dirname, chunk)
+	fp, err := os.OpenFile(filename, fl, 0666)
 	if err != nil {
-		return nil, fmt.Errorf("seek file %q until the end: %v", fp.Name(), err)
+		return nil, fmt.Errorf("create file %q: %s", filename, err)
 	}
 
 	s.fps[chunk] = fp
@@ -133,7 +134,7 @@ func (s *OnDisk) Read(chunk string, offset uint64, maxSize uint64, w io.Writer) 
 		return fmt.Errorf("stat %q: %w", chunk, err)
 	}
 
-	fp, err := s.getFileDescriptor(chunk)
+	fp, err := s.getFileDescriptor(chunk, false)
 	if err != nil {
 		return fmt.Errorf("getFileDescriptor(%q): %v", chunk, err)
 	}
@@ -187,7 +188,7 @@ func (s *OnDisk) isLastChunk(chunk string) bool {
 }
 
 // Ack 将当前消息块标记为完成并删除其内容
-func (s *OnDisk) Ack(chunk string, size int64) error {
+func (s *OnDisk) Ack(chunk string, size uint64) error {
 	if s.isLastChunk(chunk) {
 		return fmt.Errorf("could not delete incomplete chunk %q", chunk)
 	}
@@ -199,7 +200,7 @@ func (s *OnDisk) Ack(chunk string, size int64) error {
 		return fmt.Errorf("stat %q: %w", chunk, err)
 	}
 
-	if fi.Size() > size {
+	if uint64(fi.Size()) > size {
 		return fmt.Errorf("文件未完全处理：提供的已处理大小 %d 小于 Chunk 文件大小 %d", size, fi.Size())
 	}
 

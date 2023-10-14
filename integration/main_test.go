@@ -1,19 +1,19 @@
-package main
+package integration
 
 import (
 	"errors"
 	"fmt"
+	"github.com/phayes/freeport"
 	"github.com/yanyanran/yerfYar/client"
-	"go/build"
 	"io"
 	"io/ioutil"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 )
 
@@ -30,53 +30,54 @@ type sumAndErr struct {
 	err error
 }
 
-func main() {
-	if err := runTest(); err != nil {
-		log.Fatalf("Test failed: %v", err)
-	}
+func TestSimpleClientAndServerConcurrently(t *testing.T) {
+	t.Parallel()
+	simpleClientAndServerTest(t, true)
+}
 
-	log.Printf("Test passed!")
+func TestSimpleClientAndServerSequentially(t *testing.T) {
+	t.Parallel()
+	simpleClientAndServerTest(t, false)
 }
 
 // 更细粒度的测试
-func runTest() error {
+func simpleClientAndServerTest(t *testing.T, concurrent bool) {
+	t.Helper()
+
 	log.SetFlags(log.Flags() | log.Lmicroseconds)
 
-	goPath := os.Getenv("GOPATH")
-	if goPath == "" {
-		goPath = build.Default.GOPATH
-	}
-
-	log.Printf("编译yerfYar....")
-	out, err := exec.Command("go", "install", "-v", "github.com/yanyanran/yerfYar").CombinedOutput()
+	port, err := freeport.GetFreePort()
 	if err != nil {
-		log.Printf("Failed to build: %v", err)
-		return fmt.Errorf("compilation failed: %v (out: %s)", err, string(out))
+		t.Fatalf("Failed to get free port: %v", err)
 	}
 
-	// TODO: 随机端口
-	port := 8080 // "test" in l33t
+	dbPath, err := os.MkdirTemp(os.TempDir(), "chukcha")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
 
-	// TODO: 使数据库路径随机
-	dbPath := filepath.Join(os.TempDir(), "yerfYar")
-	os.RemoveAll(dbPath)
+	t.Cleanup(func() { os.RemoveAll(dbPath) })
 	os.Mkdir(dbPath, 0777)
 
 	ioutil.WriteFile(filepath.Join(dbPath, "chunk1"), []byte("12345\n"), 0666)
 
 	log.Printf("Running yerfYar on port %d", port)
 
-	cmd := exec.Command(goPath+"/bin/yerfYar", "-dirname="+dbPath, fmt.Sprintf("-port=%d", port))
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err = cmd.Start()
-	if err != nil {
-		return err
-	}
-	defer cmd.Process.Kill()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- InitAndServe(dbPath, uint(port))
+	}()
 
 	log.Printf("Waiting for the port localhost:%d to open", port)
 	for i := 0; i <= 100; i++ {
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("InitAndServe failed: %v", err)
+			}
+		default:
+		}
+
 		timeout := time.Millisecond * 50
 		conn, err := net.DialTimeout("tcp", net.JoinHostPort("localhost", fmt.Sprint(port)), timeout)
 		if err != nil {
@@ -91,17 +92,31 @@ func runTest() error {
 
 	s := client.NewSimple([]string{fmt.Sprintf("http://localhost:%d", port)})
 
-	want, got, err := sendAndReceiveConcurrently(s)
-	if err != nil {
-		return err
+	var want, got int64
+
+	if concurrent {
+		want, got, err = sendAndReceiveConcurrently(s)
+		if err != nil {
+			t.Fatalf("sendAndReceiveConcurrently: %v", err)
+		}
+	} else {
+		want, err = send(s)
+		if err != nil {
+			t.Fatalf("send error: %v", err)
+		}
+
+		sendFinishedCh := make(chan bool, 1)
+		sendFinishedCh <- true
+		got, err = receive(s, sendFinishedCh)
+		if err != nil {
+			t.Fatalf("receive error: %v", err)
+		}
 	}
 
 	want += 12345 // 已存在的chunk的内容
 	if want != got {
-		return fmt.Errorf("the expected sum %d is not equal to the actual sum %d (delivered %1.f%%)", want, got, (float64(got)/float64(want))*100)
+		t.Errorf("the expected sum %d is not equal to the actual sum %d (delivered %1.f%%)", want, got, (float64(got)/float64(want))*100)
 	}
-
-	return nil
 }
 
 // 并发发送和接收
