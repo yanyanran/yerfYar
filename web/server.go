@@ -2,21 +2,33 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/valyala/fasthttp"
 	"github.com/yanyanran/yerfYar/server"
+	"go.etcd.io/etcd/client"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 )
 
 type Server struct {
-	s    *server.OnDisk
-	port uint
+	etcd    client.KeysAPI
+	dirname string
+	port    uint
+
+	mu       sync.Mutex
+	storages map[string]*server.OnDisk
 }
 
-func NewServer(s *server.OnDisk, port uint) *Server {
+func NewServer(etcd client.KeysAPI, dirname string, port uint) *Server {
 	return &Server{
-		s:    s,
-		port: port,
+		etcd:     etcd,
+		dirname:  dirname,
+		port:     port,
+		storages: make(map[string]*server.OnDisk),
 	}
 }
 
@@ -35,14 +47,71 @@ func (s *Server) handler(ctx *fasthttp.RequestCtx) {
 	}
 }
 
+func isValidCategory(category string) bool {
+	if category == "" {
+		return false
+	}
+
+	cleanPath := filepath.Clean(category)
+	if cleanPath != category {
+		return false
+	}
+
+	if strings.ContainsAny(category, `/\.`) {
+		return false
+	}
+	return true
+}
+
+func (s *Server) getStorageForCategory(category string) (*server.OnDisk, error) {
+	if !isValidCategory(category) {
+		return nil, errors.New("invalid category name")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	storage, ok := s.storages[category]
+	if ok {
+		return storage, nil
+	}
+
+	dir := filepath.Join(s.dirname, category)
+	if err := os.MkdirAll(dir, 0777); err != nil {
+		return nil, fmt.Errorf("creating directory for the category: %v", err)
+	}
+
+	storage, err := server.NewOnDisk(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	s.storages[category] = storage
+	return storage, nil
+}
+
 func (s *Server) writeHandler(ctx *fasthttp.RequestCtx) {
-	if err := s.s.Write(ctx.Request.Body()); err != nil {
+	storage, err := s.getStorageForCategory(string(ctx.QueryArgs().Peek("category")))
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString(err.Error())
+		return
+	}
+
+	if err := storage.Write(ctx.Request.Body()); err != nil {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
 	}
 }
 
 func (s *Server) ackHandler(ctx *fasthttp.RequestCtx) {
+	storage, err := s.getStorageForCategory(string(ctx.QueryArgs().Peek("category")))
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString(err.Error())
+		return
+	}
+
 	chunk := ctx.QueryArgs().Peek("chunk")
 	if len(chunk) == 0 {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
@@ -56,13 +125,20 @@ func (s *Server) ackHandler(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := s.s.Ack(string(chunk), uint64(size)); err != nil {
+	if err := storage.Ack(string(chunk), uint64(size)); err != nil {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
 	}
 }
 
 func (s *Server) readHandler(ctx *fasthttp.RequestCtx) {
+	storage, err := s.getStorageForCategory(string(ctx.QueryArgs().Peek("category")))
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString(err.Error())
+		return
+	}
+
 	off, err := ctx.QueryArgs().GetUint("off")
 	if err != nil {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
@@ -84,7 +160,7 @@ func (s *Server) readHandler(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	err = s.s.Read(string(chunk), uint64(off), uint64(maxSize), ctx)
+	err = storage.Read(string(chunk), uint64(off), uint64(maxSize), ctx)
 	if err != nil && err != io.EOF {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
@@ -93,7 +169,14 @@ func (s *Server) readHandler(ctx *fasthttp.RequestCtx) {
 }
 
 func (s *Server) listChunksHandler(ctx *fasthttp.RequestCtx) {
-	chunks, err := s.s.ListChunks()
+	storage, err := s.getStorageForCategory(string(ctx.QueryArgs().Peek("category")))
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString(err.Error())
+		return
+	}
+
+	chunks, err := storage.ListChunks()
 	if err != nil {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())

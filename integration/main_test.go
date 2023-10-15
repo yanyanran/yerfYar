@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -46,9 +47,24 @@ func simpleClientAndServerTest(t *testing.T, concurrent bool) {
 
 	log.SetFlags(log.Flags() | log.Lmicroseconds)
 
+	etcdPeerPort, err := freeport.GetFreePort()
+	if err != nil {
+		t.Fatalf("Failed to get free port for etcd peer: %v", err)
+	}
+
+	etcdPort, err := freeport.GetFreePort()
+	if err != nil {
+		t.Fatalf("Failed to get free port for etcd: %v", err)
+	}
+
 	port, err := freeport.GetFreePort()
 	if err != nil {
 		t.Fatalf("Failed to get free port: %v", err)
+	}
+
+	etcdPath, err := os.MkdirTemp(os.TempDir(), "etcd")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir for etcd: %v", err)
 	}
 
 	dbPath, err := os.MkdirTemp(os.TempDir(), "chukcha")
@@ -57,16 +73,33 @@ func simpleClientAndServerTest(t *testing.T, concurrent bool) {
 	}
 
 	t.Cleanup(func() { os.RemoveAll(dbPath) })
-	os.Mkdir(dbPath, 0777)
+	t.Cleanup(func() { os.RemoveAll(etcdPath) })
 
-	ioutil.WriteFile(filepath.Join(dbPath, "chunk1"), []byte("12345\n"), 0666)
+	categoryPath := filepath.Join(dbPath, "numbers")
+	os.MkdirAll(categoryPath, 0777)
+
+	ioutil.WriteFile(filepath.Join(categoryPath, fmt.Sprintf("chunk%09d", 1)), []byte("12345\n"), 0666)
 
 	log.Printf("Running yerfYar on port %d", port)
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- InitAndServe(dbPath, uint(port))
+		errCh <- InitAndServe(fmt.Sprintf("http://localhost:%d/", etcdPort), dbPath, uint(port))
 	}()
+
+	etcdArgs := []string{"--data-dir", etcdPath,
+		"--listen-client-urls", fmt.Sprintf("http://localhost:%d", etcdPort),
+		"--advertise-client-urls", fmt.Sprintf("http://localhost:%d", etcdPort),
+		"--listen-peer-urls", fmt.Sprintf("http://localhost:%d", etcdPeerPort)}
+
+	log.Printf("Running `etcd %s`", strings.Join(etcdArgs, " "))
+
+	cmd := exec.Command("etcd", etcdArgs...)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Could not run etcd: %v", err)
+	}
+
+	t.Cleanup(func() { cmd.Process.Kill() })
 
 	log.Printf("Waiting for the port localhost:%d to open", port)
 	for i := 0; i <= 100; i++ {
@@ -176,7 +209,7 @@ func send(s *client.Simple) (sum int64, err error) {
 
 		if len(buf) >= maxBufferSize {
 			start := time.Now()
-			if err := s.Send(buf); err != nil {
+			if err := s.Send("numbers", buf); err != nil {
 				return 0, err
 			}
 			networkTime += time.Since(start)
@@ -188,7 +221,7 @@ func send(s *client.Simple) (sum int64, err error) {
 
 	if len(buf) != 0 {
 		start := time.Now()
-		if err := s.Send(buf); err != nil {
+		if err := s.Send("numbers", buf); err != nil {
 			return 0, err
 		}
 		networkTime += time.Since(start)
@@ -197,6 +230,8 @@ func send(s *client.Simple) (sum int64, err error) {
 
 	return sum, nil
 }
+
+var randomTempErr = errors.New("a random temporary error occurred")
 
 func receive(s *client.Simple, sendFinishedCh chan bool) (sum int64, err error) {
 	buf := make([]byte, maxBufferSize)
@@ -210,7 +245,9 @@ func receive(s *client.Simple, sendFinishedCh chan bool) (sum int64, err error) 
 	trimNL := func(r rune) bool { return r == '\n' }
 
 	sendFinished := false
+	loopCnt := 0
 	for {
+		loopCnt++
 		select {
 		case <-sendFinishedCh:
 			log.Printf("Receive: got information that send finished")
@@ -218,8 +255,30 @@ func receive(s *client.Simple, sendFinishedCh chan bool) (sum int64, err error) 
 		default:
 		}
 
-		res, err := s.Receive(buf)
-		if errors.Is(err, io.EOF) { // 接收操作已完成
+		err := s.Process("numbers", buf, func(res []byte) error {
+			if loopCnt%10 == 0 {
+				return randomTempErr
+			}
+
+			start := time.Now()
+
+			ints := strings.Split(strings.TrimRightFunc(string(res), trimNL), "\n")
+			for _, str := range ints {
+				i, err := strconv.Atoi(str)
+				if err != nil {
+					return err
+				}
+
+				sum += int64(i)
+			}
+
+			parseTime += time.Since(start)
+			return nil
+		})
+
+		if errors.Is(err, randomTempErr) {
+			continue
+		} else if errors.Is(err, io.EOF) {
 			if sendFinished {
 				// send已完成
 				return sum, nil
@@ -230,19 +289,5 @@ func receive(s *client.Simple, sendFinishedCh chan bool) (sum int64, err error) 
 		} else if err != nil {
 			return 0, err
 		}
-
-		start := time.Now()
-
-		ints := strings.Split(strings.TrimRightFunc(string(res), trimNL), "\n")
-		for _, str := range ints {
-			i, err := strconv.Atoi(str)
-			if err != nil {
-				return 0, err
-			}
-
-			sum += int64(i)
-		}
-
-		parseTime += time.Since(start)
 	}
 }
