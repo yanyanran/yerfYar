@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"github.com/valyala/fasthttp"
 	"github.com/yanyanran/yerfYar/server"
-	"go.etcd.io/etcd/client"
+	"github.com/yanyanran/yerfYar/server/replication"
+	"go.etcd.io/etcd/clientv3"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,20 +16,24 @@ import (
 )
 
 type Server struct {
-	etcd    client.KeysAPI
-	dirname string
-	port    uint
+	etcd         *clientv3.Client
+	instanceName string
+	dirname      string
+	listenAddr   string
+	replStorage  *replication.Storage
 
 	mu       sync.Mutex
 	storages map[string]*server.OnDisk
 }
 
-func NewServer(etcd client.KeysAPI, dirname string, port uint) *Server {
+func NewServer(etcd *clientv3.Client, instanceName string, dirname string, listenAddr string, replStorage *replication.Storage) *Server {
 	return &Server{
-		etcd:     etcd,
-		dirname:  dirname,
-		port:     port,
-		storages: make(map[string]*server.OnDisk),
+		etcd:         etcd,
+		instanceName: instanceName,
+		dirname:      dirname,
+		listenAddr:   listenAddr,
+		replStorage:  replStorage,
+		storages:     make(map[string]*server.OnDisk),
 	}
 }
 
@@ -81,7 +86,7 @@ func (s *Server) getStorageForCategory(category string) (*server.OnDisk, error) 
 		return nil, fmt.Errorf("creating directory for the category: %v", err)
 	}
 
-	storage, err := server.NewOnDisk(dir)
+	storage, err := server.NewOnDisk(dir, category, s.instanceName, s.replStorage)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +103,7 @@ func (s *Server) writeHandler(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := storage.Write(ctx.Request.Body()); err != nil {
+	if err := storage.Write(ctx, ctx.Request.Body()); err != nil {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
 	}
@@ -189,5 +194,5 @@ func (s *Server) listChunksHandler(ctx *fasthttp.RequestCtx) {
 }
 
 func (s *Server) Serve() error {
-	return fasthttp.ListenAndServe(fmt.Sprintf(":%d", s.port), s.handler)
+	return fasthttp.ListenAndServe(s.listenAddr, s.handler)
 }

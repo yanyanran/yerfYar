@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,8 +11,8 @@ import (
 func TestInitLastChunkIdx(t *testing.T) {
 	dir := getTempDir(t)
 
-	testCreateFile(t, filepath.Join(dir, "chunk1"))
-	testCreateFile(t, filepath.Join(dir, "chunk10"))
+	testCreateFile(t, filepath.Join(dir, "moscow-chunk1"))
+	testCreateFile(t, filepath.Join(dir, "moscow-chunk10"))
 	srv := testNewOnDisk(t, dir)
 
 	want := uint64(11)
@@ -24,7 +25,7 @@ func TestInitLastChunkIdx(t *testing.T) {
 
 func TestGetFileDescriptor(t *testing.T) {
 	dir := getTempDir(t)
-	testCreateFile(t, filepath.Join(dir, "chunk1"))
+	testCreateFile(t, filepath.Join(dir, "moscow-chunk1"))
 	srv := testNewOnDisk(t, dir)
 
 	testCases := []struct {
@@ -35,25 +36,25 @@ func TestGetFileDescriptor(t *testing.T) {
 	}{
 		{
 			desc:     "从现有文件读取, 不应失败",
-			filename: "chunk1",
+			filename: "moscow-chunk1",
 			write:    false,
 			wantErr:  false,
 		},
 		{
 			desc:     "不应覆盖现有文件",
-			filename: "chunk1",
+			filename: "moscow-chunk1",
 			write:    true,
 			wantErr:  true,
 		},
 		{
 			desc:     "不应该从不存在的文件中读取",
-			filename: "chunk2",
+			filename: "moscow-chunk2",
 			write:    false,
 			wantErr:  true,
 		},
 		{
 			desc:     "应该能创建不存在的文件",
-			filename: "chunk2",
+			filename: "moscow-chunk2",
 			write:    true,
 			wantErr:  false,
 		},
@@ -77,7 +78,7 @@ func TestReadWrite(t *testing.T) {
 	srv := testNewOnDisk(t, getTempDir(t))
 
 	want := "one\ntwo\nthree\nfour\n"
-	if err := srv.Write([]byte(want)); err != nil {
+	if err := srv.Write(context.Background(), []byte(want)); err != nil {
 		t.Fatalf("写入失败: %v", err)
 	}
 
@@ -102,9 +103,7 @@ func TestReadWrite(t *testing.T) {
 		t.Errorf("Read(%q) = %q, want %q", chunk, got, want)
 	}
 
-	// Check that the last message is not chopped and only the first
-	// three messages are returned if the buffer size is too small to
-	// fit all four messages.
+	// 检查最后一条消息是否未被截断，如果缓冲区大小太小而无法容纳所有四个消息，则仅返回前三个消息。
 	want = "one\ntwo\nthree\n"
 	b.Reset()
 	if err := srv.Read(chunk, 0, uint64(len(want)+1), &b); err != nil {
@@ -121,7 +120,7 @@ func TestAckOfTheLastChunk(t *testing.T) {
 	srv := testNewOnDisk(t, getTempDir(t))
 
 	want := "one\ntwo\nthree\nfour\n"
-	if err := srv.Write([]byte(want)); err != nil {
+	if err := srv.Write(context.Background(), []byte(want)); err != nil {
 		t.Fatalf("想要没有错误: %v", err)
 	}
 
@@ -142,10 +141,10 @@ func TestAckOfTheLastChunk(t *testing.T) {
 func TestAckOfTheCompleteChunk(t *testing.T) {
 	dir := getTempDir(t)
 	srv := testNewOnDisk(t, dir)
-	testCreateFile(t, filepath.Join(dir, "chunk1"))
+	testCreateFile(t, filepath.Join(dir, "moscow-chunk1"))
 
-	if err := srv.Ack("chunk1", 0); err != nil {
-		t.Errorf("Ack(chunk1) = %v, 预计不会出现错误", err)
+	if err := srv.Ack("moscow-chunk1", 0); err != nil {
+		t.Errorf("Ack(moscow-chunk1) = %v, 预计不会出现错误", err)
 	}
 }
 
@@ -162,10 +161,16 @@ func getTempDir(t *testing.T) string {
 	return dir
 }
 
+type nilHooks struct{}
+
+func (n *nilHooks) BeforeCreatingChunk(ctx context.Context, category string, fileName string) error {
+	return nil
+}
+
 func testNewOnDisk(t *testing.T, dir string) *OnDisk {
 	t.Helper()
 
-	srv, err := NewOnDisk(dir)
+	srv, err := NewOnDisk(dir, "test", "moscow", &nilHooks{})
 	if err != nil {
 		t.Fatalf("NewOnDisk(): %v", err)
 	}

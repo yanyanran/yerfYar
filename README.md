@@ -25,11 +25,19 @@ yerfYar是一个运行于Linux系统的，易于使用的分布式面向消息�
 
 ## 复制
 
-1、数据目录中的每个文件如下所示：`<category>/<server_name>-chuckXXXXXXXX`
+1、默认情况下复制是异步的，可以选择等待写入的数据复制到至少N个其他服务器。
 
-2、集群中的每个实例都必须具有唯一的名称，并且该名称将用作该类别中所有文件的前缀。
+2、没有leaders和followers：所有chunk都被复制到集群中的服务器中，所有节点都是平等的
 
-3、客户端将只连接到一个实例，并使用已下载到当前实例的所有服务器中的块。
+3、数据目录中的每个文件如下所示：`<category>/<server_name>-chuckXXXXXXXX`
+
+4、集群中的每个实例都必须具有唯一的名称，并且该名称将用作该类别中所有文件的前缀。
+
+5、客户端应该只连接到一个服务端实例并使用写入的chunk，因为所有数据都复制到了每个节点。
+
+6、如果节点永远消失，超时后最后一个chunk将被标记为complete（已完成）。
+
+![](https://github.com/yanyanran/pictures/blob/main/yerfYar_replication.png?raw=true)
 
 ## 设计（在建工程）
 

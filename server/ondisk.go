@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"github.com/yanyanran/yerfYar/protocal"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -18,8 +20,16 @@ const maxFileChunkSize = 20 * 1024 * 1024 // bytes
 var errBufTooSmall = errors.New("the buffer is too small to contain a single message")
 var filenameRegexp = regexp.MustCompile("^chunk([0-9]+)$") // 匹配以"chunk"开头，后跟一个或多个数字的字符串
 
+type StorageHooks interface {
+	BeforeCreatingChunk(ctx context.Context, category string, fileName string) error
+}
+
 type OnDisk struct {
-	dirname string
+	dirname      string
+	category     string
+	instanceName string
+
+	repl StorageHooks
 
 	writeMu       sync.Mutex
 	lastChunk     string
@@ -30,10 +40,13 @@ type OnDisk struct {
 	fps   map[string]*os.File // 缓存已打开的文件描述符，以便在需要读或写文件块时可快速访问
 }
 
-func NewOnDisk(dirname string) (*OnDisk, error) {
+func NewOnDisk(dirname, category, instanceName string, repl StorageHooks) (*OnDisk, error) {
 	s := &OnDisk{
-		dirname: dirname,
-		fps:     make(map[string]*os.File),
+		dirname:      dirname,
+		category:     category,
+		instanceName: instanceName,
+		repl:         repl,
+		fps:          make(map[string]*os.File),
 	}
 
 	if err := s.initLastChunkIdx(dirname); err != nil {
@@ -49,8 +62,13 @@ func (s *OnDisk) initLastChunkIdx(dirname string) error {
 		return fmt.Errorf("readdir(%q): %v", dirname, err)
 	}
 
+	prefix := s.instanceName + "-"
 	for _, fi := range files {
-		res := filenameRegexp.FindStringSubmatch(fi.Name()) // ...chunk1 chunk2...
+		if !strings.HasPrefix(fi.Name(), prefix) {
+			continue
+		}
+
+		res := filenameRegexp.FindStringSubmatch(strings.TrimPrefix(fi.Name(), prefix)) // ...chunk1 chunk2...
 		if res == nil {
 			continue
 		}
@@ -68,14 +86,19 @@ func (s *OnDisk) initLastChunkIdx(dirname string) error {
 	return nil
 }
 
-func (s *OnDisk) Write(msgs []byte) error {
+func (s *OnDisk) Write(ctx context.Context, msgs []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
 	if s.lastChunk == "" || (s.lastChunkSize+uint64(len(msgs)) > maxFileChunkSize) {
-		s.lastChunk = fmt.Sprintf("chunk%09d", s.lastChunkIdx)
+		s.lastChunk = fmt.Sprintf("%s-chunk%09d", s.instanceName, s.lastChunkIdx)
 		s.lastChunkSize = 0
 		s.lastChunkIdx++
+
+		// 创建新chunk时，对新chunk完成在etcd的注册
+		if err := s.repl.BeforeCreatingChunk(ctx, s.category, s.lastChunk); err != nil {
+			return fmt.Errorf("before creating new chunk: %w", err)
+		}
 	}
 
 	fp, err := s.getFileDescriptor(s.lastChunk, true)
