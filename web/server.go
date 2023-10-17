@@ -7,7 +7,6 @@ import (
 	"github.com/valyala/fasthttp"
 	"github.com/yanyanran/yerfYar/server"
 	"github.com/yanyanran/yerfYar/server/replication"
-	"go.etcd.io/etcd/clientv3"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,22 +15,23 @@ import (
 )
 
 type Server struct {
-	etcd         *clientv3.Client
 	instanceName string
 	dirname      string
 	listenAddr   string
-	replStorage  *replication.Storage
+
+	replClient  *replication.Client
+	replStorage *replication.Storage
 
 	mu       sync.Mutex
 	storages map[string]*server.OnDisk
 }
 
-func NewServer(etcd *clientv3.Client, instanceName string, dirname string, listenAddr string, replStorage *replication.Storage) *Server {
+func NewServer(replClient *replication.Client, instanceName string, dirname string, listenAddr string, replStorage *replication.Storage) *Server {
 	return &Server{
-		etcd:         etcd,
 		instanceName: instanceName,
 		dirname:      dirname,
 		listenAddr:   listenAddr,
+		replClient:   replClient,
 		replStorage:  replStorage,
 		storages:     make(map[string]*server.OnDisk),
 	}
