@@ -1,4 +1,4 @@
-package protocal
+package protocol
 
 // Chunk 一段数据，包含写入其中的消息
 type Chunk struct {

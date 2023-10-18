@@ -8,10 +8,8 @@ import (
 	"github.com/yanyanran/yerfYar/server"
 	"github.com/yanyanran/yerfYar/server/replication"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 )
 
 type Server struct {
@@ -19,21 +17,22 @@ type Server struct {
 	dirname      string
 	listenAddr   string
 
-	replClient  *replication.Client
+	replClient  *replication.State
 	replStorage *replication.Storage
 
-	mu       sync.Mutex
-	storages map[string]*server.OnDisk
+	getOnDisk GetOnDiskFn
 }
 
-func NewServer(replClient *replication.Client, instanceName string, dirname string, listenAddr string, replStorage *replication.Storage) *Server {
+type GetOnDiskFn func(category string) (*server.OnDisk, error)
+
+func NewServer(replClient *replication.State, instanceName string, dirname string, listenAddr string, replStorage *replication.Storage, getOnDisk GetOnDiskFn) *Server {
 	return &Server{
 		instanceName: instanceName,
 		dirname:      dirname,
 		listenAddr:   listenAddr,
 		replClient:   replClient,
 		replStorage:  replStorage,
-		storages:     make(map[string]*server.OnDisk),
+		getOnDisk:    getOnDisk,
 	}
 }
 
@@ -73,26 +72,7 @@ func (s *Server) getStorageForCategory(category string) (*server.OnDisk, error) 
 		return nil, errors.New("invalid category name")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	storage, ok := s.storages[category]
-	if ok {
-		return storage, nil
-	}
-
-	dir := filepath.Join(s.dirname, category)
-	if err := os.MkdirAll(dir, 0777); err != nil {
-		return nil, fmt.Errorf("creating directory for the category: %v", err)
-	}
-
-	storage, err := server.NewOnDisk(dir, category, s.instanceName, s.replStorage)
-	if err != nil {
-		return nil, err
-	}
-
-	s.storages[category] = storage
-	return storage, nil
+	return s.getOnDisk(category)
 }
 
 func (s *Server) writeHandler(ctx *fasthttp.RequestCtx) {

@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/yanyanran/yerfYar/protocal"
+	"github.com/yanyanran/yerfYar/protocol"
 	"io"
 	"os"
 	"path/filepath"
@@ -84,6 +84,19 @@ func (s *OnDisk) initLastChunkIdx(dirname string) error {
 	}
 
 	return nil
+}
+
+// WriteDirect 直接写入chunk文件以避免复制的循环依赖（非线程安全）
+func (s *OnDisk) WriteDirect(chunk string, contents []byte) error {
+	filename := filepath.Join(s.dirname, chunk)
+	fp, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		return err
+	}
+	defer fp.Close()
+
+	_, err = fp.Write(contents)
+	return err
 }
 
 func (s *OnDisk) Write(ctx context.Context, msgs []byte) error {
@@ -235,8 +248,8 @@ func (s *OnDisk) Ack(chunk string, size uint64) error {
 	return nil
 }
 
-func (s *OnDisk) ListChunks() ([]protocal.Chunk, error) {
-	var res []protocal.Chunk
+func (s *OnDisk) ListChunks() ([]protocol.Chunk, error) {
+	var res []protocol.Chunk
 
 	dis, err := os.ReadDir(s.dirname)
 	if err != nil {
@@ -251,7 +264,7 @@ func (s *OnDisk) ListChunks() ([]protocal.Chunk, error) {
 			return nil, fmt.Errorf("reading directory: %v", err)
 		}
 
-		c := protocal.Chunk{
+		c := protocol.Chunk{
 			Name:     di.Name(),
 			Complete: di.Name() != s.lastChunk,
 			Size:     uint64(fi.Size()),

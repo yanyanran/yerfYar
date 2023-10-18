@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/yanyanran/yerfYar/protocal"
+	"github.com/yanyanran/yerfYar/protocol"
 	"io"
 	"math/rand"
 	"net/http"
@@ -20,7 +20,7 @@ var errRetry = errors.New("please retry the request")
 type Simple struct {
 	addr     []string
 	cl       *http.Client
-	curChunk protocal.Chunk
+	curChunk protocol.Chunk
 	offset   uint64
 }
 
@@ -126,7 +126,7 @@ func (s *Simple) process(category string, scratch []byte, processFn func([]byte)
 			return fmt.Errorf("ack current chunk: %v", err)
 		}
 		// 需要读取下一个chunk，这样我们就不会返回空响应
-		s.curChunk = protocal.Chunk{}
+		s.curChunk = protocol.Chunk{}
 		s.offset = 0
 		return errRetry
 	}
@@ -144,7 +144,7 @@ func (s *Simple) updateCurrentChunk(category, addr string) error {
 		return nil
 	}
 
-	chunks, err := s.listChunks(category, addr)
+	chunks, err := s.ListChunks(category, addr)
 	if err != nil {
 		return fmt.Errorf("listChunks failed: %v", err)
 	}
@@ -165,7 +165,7 @@ func (s *Simple) updateCurrentChunk(category, addr string) error {
 }
 
 func (s *Simple) updateCurrentChunkCompleteStatus(category, addr string) error {
-	chunks, err := s.listChunks(category, addr)
+	chunks, err := s.ListChunks(category, addr)
 	if err != nil {
 		return fmt.Errorf("listChunks failed: %v", err)
 	}
@@ -180,7 +180,9 @@ func (s *Simple) updateCurrentChunkCompleteStatus(category, addr string) error {
 	return nil
 }
 
-func (s *Simple) listChunks(category, addr string) ([]protocal.Chunk, error) {
+// ListChunks 返回相应yerkYar实例的chunk列表
+// TODO: 将其提取到一个单独的client中
+func (s *Simple) ListChunks(category, addr string) ([]protocol.Chunk, error) {
 	u := url.Values{}
 	u.Add("category", category)
 
@@ -201,7 +203,7 @@ func (s *Simple) listChunks(category, addr string) ([]protocal.Chunk, error) {
 		return nil, fmt.Errorf("listChunks error: %s", body)
 	}
 
-	var res []protocal.Chunk
+	var res []protocol.Chunk
 	// 创建JSON解码器并将响应体的内容解码为res
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 		return nil, err

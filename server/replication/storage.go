@@ -7,11 +7,11 @@ import (
 
 // Storage 为磁盘存储提供hooks，调用以确保复制chunk
 type Storage struct {
-	client          *Client
+	client          *State
 	currentInstance string
 }
 
-func NewStorage(client *Client, currentInstance string) *Storage {
+func NewStorage(client *State, currentInstance string) *Storage {
 	return &Storage{
 		client:          client,
 		currentInstance: currentInstance,
