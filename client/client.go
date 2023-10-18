@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/yanyanran/yerfYar/protocol"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -18,7 +19,9 @@ const defaultScratchSize = 64 * 1024
 var errRetry = errors.New("please retry the request")
 
 type Simple struct {
-	addr     []string
+	Debug bool
+
+	addrs    []string
 	cl       *http.Client
 	curChunk protocol.Chunk
 	offset   uint64
@@ -26,15 +29,27 @@ type Simple struct {
 
 func NewSimple(addrs []string) *Simple {
 	return &Simple{
-		addr: addrs,
-		cl:   &http.Client{},
+		addrs: addrs,
+		cl:    &http.Client{},
 	}
+}
+
+func (s *Simple) getAddr() string {
+	addrIdx := rand.Intn(len(s.addrs))
+	return s.addrs[addrIdx]
 }
 
 func (s *Simple) Send(category string, msgs []byte) error {
 	u := url.Values{}
 	u.Add("category", category)
-	res, err := s.cl.Post(s.addr[0]+"/write?"+u.Encode(), "application/octet-stream", bytes.NewReader(msgs))
+
+	url := s.getAddr() + "/write?" + u.Encode()
+
+	if s.Debug {
+		log.Printf("向 %s 发送以下消息: %q", url, msgs)
+	}
+
+	res, err := s.cl.Post(url, "application/octet-stream", bytes.NewReader(msgs))
 	if err != nil {
 		return err
 	}
@@ -43,7 +58,7 @@ func (s *Simple) Send(category string, msgs []byte) error {
 	if res.StatusCode != http.StatusOK {
 		var b bytes.Buffer
 		io.Copy(&b, res.Body)
-		return fmt.Errorf("http code %d, %s", res.StatusCode, b.String())
+		return fmt.Errorf("http 状态码 %d, %s", res.StatusCode, b.String())
 	}
 
 	io.Copy(io.Discard, res.Body)
@@ -61,6 +76,9 @@ func (s *Simple) Process(category string, scratch []byte, processFn func([]byte)
 	for {
 		err := s.process(category, scratch, processFn)
 		if err == errRetry {
+			if s.Debug {
+				log.Printf("正在重试读取类别 %q ...", category)
+			}
 			continue
 		}
 		return nil
@@ -68,8 +86,8 @@ func (s *Simple) Process(category string, scratch []byte, processFn func([]byte)
 }
 
 func (s *Simple) process(category string, scratch []byte, processFn func([]byte) error) error {
-	addrIndex := rand.Intn(len(s.addr))
-	addr := s.addr[addrIndex]
+	addr := s.getAddr()
+
 	if err := s.updateCurrentChunk(category, addr); err != nil {
 		return fmt.Errorf("updateCurrentChunk: %w", err)
 	}
@@ -81,6 +99,10 @@ func (s *Simple) process(category string, scratch []byte, processFn func([]byte)
 	u.Add("category", category)
 
 	readURL := fmt.Sprintf("%s/read?%s", addr, u.Encode())
+
+	if s.Debug {
+		log.Printf("从 %s 读取", readURL)
+	}
 
 	res, err := s.cl.Get(readURL)
 	if err != nil {
