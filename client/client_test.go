@@ -8,7 +8,7 @@ import (
 
 func TestSimpleMarshalUnmarshal(t *testing.T) {
 	st := &state{
-		Offsets: map[string]ReadOffset{
+		Offsets: map[string]*ReadOffset{
 			"Moscow": {
 				CurChunk: protocol.Chunk{
 					Name:     "Moscow-test000001",

@@ -37,6 +37,7 @@ type Client struct {
 type DirectWriter interface {
 	Stat(category string, fileName string) (size int64, exists bool, err error)
 	WriteDirect(category string, fileName string, contents []byte) error
+	AckDirect(ctx context.Context, category string, chunk string) error
 }
 
 // NewCompClient 初始化复制客户端
@@ -53,6 +54,25 @@ func NewCompClient(st *State, wr DirectWriter, instanceName string) *Client {
 }
 
 func (c *Client) Loop(ctx context.Context) {
+	go c.ackLoop(ctx)
+	c.replicationLoop(ctx)
+}
+
+func (c *Client) ackLoop(ctx context.Context) {
+	for ch := range c.state.WatchAckQueue(ctx, c.instanceName) {
+		log.Printf("ack chunk %+v", ch)
+
+		if err := c.wr.AckDirect(ctx, ch.Category, ch.FileName); err != nil {
+			log.Printf("无法从ack队列确认chunk %+v: %v", ch, err)
+		}
+
+		if err := c.state.DeleteChunkFromAckQueue(ctx, c.instanceName, ch); err != nil {
+			log.Printf("无法从ack队列中删除chunk %+v： %v", ch, err)
+		}
+	}
+}
+
+func (c *Client) replicationLoop(ctx context.Context) {
 	for ch := range c.state.WatchReplicationQueue(ctx, c.instanceName) {
 		c.downloadChunk(ch)
 

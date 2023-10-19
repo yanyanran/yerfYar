@@ -26,7 +26,7 @@ type ReadOffset struct {
 }
 
 type state struct {
-	Offsets map[string]ReadOffset
+	Offsets map[string]*ReadOffset
 }
 
 type Simple struct {
@@ -40,7 +40,7 @@ func NewSimple(addrs []string) *Simple {
 	return &Simple{
 		addrs: addrs,
 		cl:    &http.Client{},
-		st:    &state{Offsets: make(map[string]ReadOffset)},
+		st:    &state{Offsets: make(map[string]*ReadOffset)},
 	}
 }
 
@@ -162,7 +162,7 @@ func (s *Simple) process(addr, instance, category string, scratch []byte, proces
 	// 读0个字节但没错，意味着按照约定文件结束
 	if b.Len() == 0 {
 		if !curCh.CurChunk.Complete {
-			if err := s.updateCurrentChunkCompleteStatus(instance, category, addr); err != nil {
+			if err := s.updateCurrentChunkCompleteStatus(curCh, instance, category, addr); err != nil {
 				return fmt.Errorf("updateCurrentChunkCompleteStatus: %v", err)
 			}
 			if !curCh.CurChunk.Complete {
@@ -230,7 +230,14 @@ func (s *Simple) updateCurrentChunks(category, addr string) error {
 	}
 
 	for instance, chunks := range chunksByInstance {
-		curChunk := s.st.Offsets[instance]
+		curChunk, exists := s.st.Offsets[instance]
+		if !exists {
+			curChunk = &ReadOffset{}
+		}
+
+		// 在两种情况下名称为空：
+		// 1、第一次尝试阅读这个例子
+		// 2、读取最新的块直到最后，并且需要开始读取新的块
 		if curChunk.CurChunk.Name == "" {
 			curChunk.CurChunk = s.getOldestChunk(chunks)
 			curChunk.Offset = 0
@@ -255,13 +262,11 @@ func (s *Simple) getOldestChunk(chunks []protocol.Chunk) protocol.Chunk {
 	return chunks[0]
 }
 
-func (s *Simple) updateCurrentChunkCompleteStatus(instance, category, addr string) error {
+func (s *Simple) updateCurrentChunkCompleteStatus(curCh *ReadOffset, instance, category, addr string) error {
 	chunks, err := s.ListChunks(category, addr)
 	if err != nil {
 		return fmt.Errorf("listChunks failed: %v", err)
 	}
-
-	curCh := s.st.Offsets[instance]
 
 	for _, c := range chunks {
 		chunkInstance, idx := protocol.ParseChunkFileName(c.Name)
@@ -273,7 +278,6 @@ func (s *Simple) updateCurrentChunkCompleteStatus(instance, category, addr strin
 		}
 		if c.Name == curCh.CurChunk.Name {
 			curCh.CurChunk = c
-			s.st.Offsets[instance] = curCh
 			return nil
 		}
 	}

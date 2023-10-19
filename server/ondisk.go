@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/yanyanran/yerfYar/protocol"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,6 +19,7 @@ var errBufTooSmall = errors.New("the buffer is too small to contain a single mes
 
 type StorageHooks interface {
 	BeforeCreatingChunk(ctx context.Context, category string, fileName string) error
+	BeforeAckChunk(ctx context.Context, category string, fileName string) error
 }
 
 type OnDisk struct {
@@ -210,7 +212,7 @@ func (s *OnDisk) isLastChunk(chunk string) bool {
 }
 
 // Ack 将当前消息块标记为完成并删除其内容
-func (s *OnDisk) Ack(chunk string, size uint64) error {
+func (s *OnDisk) Ack(ctx context.Context, chunk string, size uint64) error {
 	if s.isLastChunk(chunk) {
 		return fmt.Errorf("could not delete incomplete chunk %q", chunk)
 	}
@@ -225,6 +227,21 @@ func (s *OnDisk) Ack(chunk string, size uint64) error {
 	if uint64(fi.Size()) > size {
 		return fmt.Errorf("文件未完全处理：提供的已处理大小 %d 小于 Chunk 文件大小 %d", size, fi.Size())
 	}
+
+	if err := s.repl.BeforeAckChunk(ctx, s.category, chunk); err != nil {
+		log.Printf("无法复制ack请求: %v", err)
+	}
+
+	if err := os.Remove(chunkFilename); err != nil {
+		return fmt.Errorf("removing %q: %v", chunk, err)
+	}
+
+	s.forgetFileDescriptor(chunk)
+	return nil
+}
+
+func (s *OnDisk) AckDirect(chunk string) error {
+	chunkFilename := filepath.Join(s.dirname, chunk)
 
 	if err := os.Remove(chunkFilename); err != nil {
 		return fmt.Errorf("removing %q: %v", chunk, err)

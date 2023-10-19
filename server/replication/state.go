@@ -118,8 +118,19 @@ func (c *State) AddChunkToReplicationQueue(ctx context.Context, targetInstance s
 	return c.put(ctx, key, ch.Owner)
 }
 
+func (c *State) AddChunkToAckQueue(ctx context.Context, targetInstance string, ch Chunk) error {
+	key := "ack/" + targetInstance + "/" + ch.Category + "/" + ch.FileName
+	return c.put(ctx, key, ch.Owner)
+}
+
 func (c *State) DeleteChunkFromReplicationQueue(ctx context.Context, targetInstance string, ch Chunk) error {
 	key := "replication/" + targetInstance + "/" + ch.Category + "/" + ch.FileName
+	_, err := c.cl.Delete(ctx, c.prefix+key)
+	return err
+}
+
+func (c *State) DeleteChunkFromAckQueue(ctx context.Context, targetInstance string, ch Chunk) error {
+	key := "ack/" + targetInstance + "/" + ch.Category + "/" + ch.FileName
 	_, err := c.cl.Delete(ctx, c.prefix+key)
 	return err
 }
@@ -139,7 +150,16 @@ func (c *State) parseReplicationKey(prefix string, kv *mvccpb.KeyValue) (Chunk, 
 
 // WatchReplicationQueue 开始监视复制队列,并返回所有现有的chunk
 func (c *State) WatchReplicationQueue(ctx context.Context, instanceName string) chan Chunk {
-	prefix := c.prefix + "replication/" + instanceName + "/"
+	return c.watchQueue(ctx, "replication", instanceName)
+}
+
+// WatchAckQueue 开始观察ack队列并返回所有现有chunk
+func (c *State) WatchAckQueue(ctx context.Context, instanceName string) chan Chunk {
+	return c.watchQueue(ctx, "ack", instanceName)
+}
+
+func (c *State) watchQueue(ctx context.Context, queueName string, instanceName string) chan Chunk {
+	prefix := c.prefix + queueName + "/" + instanceName + "/"
 	resCh := make(chan Chunk)
 
 	go func() {

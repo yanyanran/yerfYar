@@ -134,7 +134,7 @@ func TestAckOfTheLastChunk(t *testing.T) {
 		t.Fatalf("len(ListChunks()) = %d, want %d", got, want)
 	}
 
-	if err := srv.Ack(chunks[0].Name, chunks[0].Size); err == nil {
+	if err := srv.Ack(context.Background(), chunks[0].Name, chunks[0].Size); err == nil {
 		t.Errorf("Ack(last chunk): 没有错误，预计会出现错误")
 	}
 }
@@ -144,7 +144,7 @@ func TestAckOfTheCompleteChunk(t *testing.T) {
 	srv := testNewOnDisk(t, dir)
 	testCreateFile(t, filepath.Join(dir, "moscow-chunk1"))
 
-	if err := srv.Ack("moscow-chunk1", 0); err != nil {
+	if err := srv.Ack(context.Background(), "moscow-chunk1", 0); err != nil {
 		t.Errorf("Ack(moscow-chunk1) = %v, 预计不会出现错误", err)
 	}
 }
@@ -165,6 +165,10 @@ func getTempDir(t *testing.T) string {
 type nilHooks struct{}
 
 func (n *nilHooks) BeforeCreatingChunk(ctx context.Context, category string, fileName string) error {
+	return nil
+}
+
+func (n *nilHooks) BeforeAckChunk(ctx context.Context, category string, fileName string) error {
 	return nil
 }
 

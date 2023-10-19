@@ -40,3 +40,26 @@ func (s *Storage) BeforeCreatingChunk(ctx context.Context, category string, file
 
 	return nil
 }
+
+func (s *Storage) BeforeAckChunk(ctx context.Context, category string, fileName string) error {
+	peers, err := s.client.ListPeers(ctx)
+	if err != nil {
+		return fmt.Errorf("从 etcd 获取 peers: %v", err)
+	}
+
+	for _, p := range peers {
+		if p.InstanceName == s.currentInstance {
+			continue
+		}
+
+		if err := s.client.AddChunkToAckQueue(ctx, p.InstanceName, Chunk{
+			Owner:    s.currentInstance,
+			Category: category,
+			FileName: fileName,
+		}); err != nil {
+			return fmt.Errorf("无法写入%q（%q）的复制队列：%w", p.InstanceName, p.ListenAddr, err)
+		}
+	}
+
+	return nil
+}
