@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"github.com/yanyanran/yerfYar/client"
 	"io"
@@ -13,7 +14,9 @@ import (
 	"syscall"
 )
 
-const simpleStateFilePath = "/tmp/simple-example-state.json"
+const simpleStateFilePath = "/tmp/simple-example-state-%s.json"
+
+var categoryName = flag.String("category", "stdin", "正在测试的类别")
 
 type readResult struct {
 	ln  string
@@ -21,10 +24,11 @@ type readResult struct {
 }
 
 func main() {
+	flag.Parse()
 	addrs := []string{"http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://10.30.0.154:8080"}
 
 	cl := client.NewSimple(addrs)
-	if buf, err := ioutil.ReadFile(simpleStateFilePath); err == nil {
+	if buf, err := ioutil.ReadFile(fmt.Sprintf(simpleStateFilePath, *categoryName)); err == nil {
 		if err := cl.RestoreSavedState(buf); err != nil {
 			log.Printf("无法恢复保存的客户端状态: %v", err)
 		}
@@ -74,7 +78,7 @@ func main() {
 			log.Fatalf("该行不完整: %q", ln)
 		}
 
-		if err := cl.Send("stdin", []byte(ln)); err != nil {
+		if err := cl.Send(*categoryName, []byte(ln)); err != nil {
 			log.Printf("向yerkYar发送数据失败: %v", err)
 		}
 
@@ -87,7 +91,7 @@ func saveState(cl *client.Simple) {
 	if err != nil {
 		log.Printf("Marshalling client状态失败: %v", err)
 	} else {
-		ioutil.WriteFile(simpleStateFilePath, buf, 0666)
+		ioutil.WriteFile(fmt.Sprintf(simpleStateFilePath, *categoryName), buf, 0666)
 	}
 	fmt.Println("")
 }
@@ -96,7 +100,7 @@ func printContinuously(cl *client.Simple) {
 	scratch := make([]byte, 1024*1024)
 
 	for {
-		cl.Process("stdin", scratch, func(b []byte) error {
+		cl.Process(*categoryName, scratch, func(b []byte) error {
 			fmt.Printf("\n")
 			log.Printf("BATCH: %s", b)
 			fmt.Printf("> ")
