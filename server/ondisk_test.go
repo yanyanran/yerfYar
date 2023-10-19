@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"github.com/yanyanran/yerfYar/protocol"
 	"os"
 	"path/filepath"
 	"testing"
@@ -206,7 +207,7 @@ func TestParseChunkFileName(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.filename, func(t *testing.T) {
-			instance, chunkIdx := parseChunkFileName(tc.filename)
+			instance, chunkIdx := protocol.ParseChunkFileName(tc.filename)
 
 			if instance != tc.instanceName || chunkIdx != tc.chunkIdx {
 				t.Errorf("parseChunkFileName(%q) = %q, %v; want %q, %v", tc.filename, instance, chunkIdx, tc.instanceName, tc.chunkIdx)

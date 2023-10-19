@@ -9,16 +9,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
-	"strings"
 	"sync"
 )
 
 // TODO: 限制msg的最大大小
 const maxFileChunkSize = 20 * 1024 * 1024 // bytes
 var errBufTooSmall = errors.New("the buffer is too small to contain a single message")
-var filenameRegexp = regexp.MustCompile("^chunk([0-9]+)$") // 匹配以"chunk"开头，后跟一个或多个数字的字符串
 
 type StorageHooks interface {
 	BeforeCreatingChunk(ctx context.Context, category string, fileName string) error
@@ -62,20 +58,10 @@ func (s *OnDisk) initLastChunkIdx(dirname string) error {
 		return fmt.Errorf("readdir(%q): %v", dirname, err)
 	}
 
-	prefix := s.instanceName + "-"
 	for _, fi := range files {
-		if !strings.HasPrefix(fi.Name(), prefix) {
+		instance, chunkIdx := protocol.ParseChunkFileName(fi.Name())
+		if chunkIdx < 0 || instance != s.instanceName {
 			continue
-		}
-
-		res := filenameRegexp.FindStringSubmatch(strings.TrimPrefix(fi.Name(), prefix)) // ...chunk1 chunk2...
-		if res == nil {
-			continue
-		}
-
-		chunkIdx, err := strconv.Atoi(res[1]) // ->int
-		if err != nil {
-			return fmt.Errorf("unexpected error parsing filename %q: %v", fi.Name(), err)
 		}
 
 		if uint64(chunkIdx)+1 >= s.lastChunkIdx {
@@ -248,30 +234,6 @@ func (s *OnDisk) Ack(chunk string, size uint64) error {
 	return nil
 }
 
-func parseChunkFileName(filename string) (instance string, chunkIdx int) {
-	var err error
-
-	idx := strings.LastIndexByte(filename, '-')
-	if idx < 0 {
-		return "", 0
-	}
-
-	instance = filename[0:idx]    // “hah-chunk123”-> "hah"
-	chunkName := filename[idx+1:] // “hah-chunk123”-> "chunk123"
-
-	res := filenameRegexp.FindStringSubmatch(chunkName)
-	if res == nil {
-		return "", 0
-	}
-
-	chunkIdx, err = strconv.Atoi(res[1]) // “hah-chunk123”-> "123"
-	if err != nil {
-		return "", 0
-	}
-
-	return instance, chunkIdx
-}
-
 func (s *OnDisk) ListChunks() ([]protocol.Chunk, error) {
 	var res []protocol.Chunk
 
@@ -288,7 +250,7 @@ func (s *OnDisk) ListChunks() ([]protocol.Chunk, error) {
 			return nil, fmt.Errorf("reading directory: %v", err)
 		}
 
-		instanceName, _ := parseChunkFileName(di.Name())
+		instanceName, _ := protocol.ParseChunkFileName(di.Name())
 
 		c := protocol.Chunk{
 			Name:     di.Name(),
@@ -298,7 +260,7 @@ func (s *OnDisk) ListChunks() ([]protocol.Chunk, error) {
 
 		if idx == len(dis)-1 { // last chunk
 			c.Complete = false
-		} else if nextInstance, _ := parseChunkFileName(dis[idx+1].Name()); nextInstance != instanceName {
+		} else if nextInstance, _ := protocol.ParseChunkFileName(dis[idx+1].Name()); nextInstance != instanceName {
 			c.Complete = false
 		}
 
