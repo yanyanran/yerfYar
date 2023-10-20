@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -31,7 +32,9 @@ type Client struct {
 	instanceName string
 	httpCl       *http.Client
 	s            *client.Simple
-	perCategory  map[string]*CategoryDownloader // 支持多category
+
+	mu          sync.Mutex
+	perCategory map[string]*CategoryDownloader // 支持多category
 }
 
 type CategoryDownloader struct {
@@ -42,6 +45,12 @@ type CategoryDownloader struct {
 	instanceName string
 	httpCl       *http.Client
 	s            *client.Simple
+
+	// 正在下载的当前chunk的信息
+	curMu          sync.Mutex
+	curChunk       Chunk
+	curChunkCancel context.CancelFunc
+	curChunkDone   chan bool
 }
 
 // DirectWriter 直接写入基础存储以进行复制
@@ -74,6 +83,8 @@ func (c *Client) ackLoop(ctx context.Context) {
 	for ch := range c.state.WatchAckQueue(ctx, c.instanceName) {
 		log.Printf("ack chunk %+v", ch)
 
+		c.ensureChunkIsNotBeingDownloaded(ch)
+
 		if err := c.wr.AckDirect(ctx, ch.Category, ch.FileName); err != nil {
 			log.Printf("无法从ack队列确认chunk %+v: %v", ch, err)
 		}
@@ -82,6 +93,29 @@ func (c *Client) ackLoop(ctx context.Context) {
 			log.Printf("无法从ack队列中删除chunk %+v： %v", ch, err)
 		}
 	}
+}
+
+// 1. 如果在 ack 前完成了chunk的下载，没问题
+// 2. 如果在 ack 完成后尝试下载chunk，下载请求将失败，因为该chunk在源中已不存在（已被ack）
+func (c *Client) ensureChunkIsNotBeingDownloaded(ch Chunk) {
+	c.mu.Lock()
+	downloader, ok := c.perCategory[ch.Category]
+	c.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	downloader.curMu.Lock()
+	downloadedChunk := downloader.curChunk
+	cancelFunc := downloader.curChunkCancel
+	doneCh := downloader.curChunkDone
+	downloader.curMu.Unlock()
+
+	if downloadedChunk.Category != ch.Category || downloadedChunk.FileName != ch.FileName || downloadedChunk.Owner != ch.Owner {
+		return
+	}
+	cancelFunc() // 取消下载
+	<-doneCh     // 等待下载完成
 }
 
 func (c *Client) replicationLoop(ctx context.Context) {
@@ -97,7 +131,10 @@ func (c *Client) replicationLoop(ctx context.Context) {
 				s:            c.s,
 			}
 			go downloader.Loop(ctx)
+
+			c.mu.Lock()
 			c.perCategory[ch.Category] = downloader
+			c.mu.Unlock()
 		}
 		downloader.eventsCh <- ch
 	}
@@ -109,7 +146,7 @@ func (c *CategoryDownloader) Loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case ch := <-c.eventsCh:
-			c.downloadChunk(ch)
+			c.downloadChunk(ctx, ch)
 
 			if err := c.state.DeleteChunkFromReplicationQueue(ctx, c.instanceName, ch); err != nil {
 				log.Printf("无法从复制队列中删除chunk %+v: %v", ch, err)
@@ -118,36 +155,70 @@ func (c *CategoryDownloader) Loop(ctx context.Context) {
 	}
 }
 
-func (c *CategoryDownloader) downloadChunk(ch Chunk) {
+func (c *CategoryDownloader) downloadChunk(parentCtx context.Context, ch Chunk) {
 	log.Printf("正在下载chunk %+v 中...", ch)
 	defer log.Printf("已完成chunk %+v 的下载", ch)
 
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	c.curMu.Lock()
+	c.curChunk = ch
+	c.curChunkCancel = cancel
+	c.curChunkDone = make(chan bool)
+	c.curMu.Unlock()
+
+	defer func() {
+		// 让别人知道我们不再处理这个chunk
+		close(c.curChunkDone)
+
+		c.curMu.Lock()
+		c.curChunk = Chunk{}
+		c.curChunkCancel = nil
+		c.curChunkDone = nil
+		c.curMu.Unlock()
+	}()
+
 	for {
-		err := c.downloadChunkIteration(ch)
-		if err == errIncomplete {
-			time.Sleep(pollInterval)
-			continue
-		} else if err != nil {
-			log.Printf("下载chunk %+v 时出现了错误: %v", ch, err)
-			time.Sleep(retryTimeout)
-			continue
+		err := c.downloadChunkIteration(ctx, ch)
+		if errors.Is(err, errNotFound) {
+			log.Printf("下载chunk %+v 时出现未找到错误，正在跳过chunk", ch)
+			return
+		} else if errors.Is(err, errIncomplete) {
+			err := c.downloadChunkIteration(ctx, ch)
+			if err == errIncomplete {
+				time.Sleep(pollInterval)
+				continue
+			} else if err != nil {
+				log.Printf("下载chunk %+v 时出现了错误: %v", ch, err)
+
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				// TODO 指数递减
+				time.Sleep(retryTimeout)
+				continue
+			}
+			return
 		}
-		return
 	}
 }
 
-func (c *CategoryDownloader) downloadChunkIteration(ch Chunk) error {
+func (c *CategoryDownloader) downloadChunkIteration(ctx context.Context, ch Chunk) error {
 	size, _, err := c.wr.Stat(ch.Category, ch.FileName)
 	if err != nil {
 		return fmt.Errorf("获取文件信息state时出现错误: %v", err)
 	}
 
-	addr, err := c.listenAddrForChunk(ch)
+	addr, err := c.listenAddrForChunk(ctx, ch)
 	if err != nil {
 		return fmt.Errorf("获取监听地址时出现错误: %v", err)
 	}
 
-	info, err := c.getChunkInfo(addr, ch)
+	info, err := c.getChunkInfo(ctx, addr, ch)
 	if err == errNotFound {
 		log.Printf("在 %q 找不到chunk", addr)
 		return nil
@@ -162,9 +233,9 @@ func (c *CategoryDownloader) downloadChunkIteration(ch Chunk) error {
 		return nil
 	}
 
-	buf, err := c.downloadPart(addr, ch, size)
+	buf, err := c.downloadPart(ctx, addr, ch, size)
 	if err != nil {
-		return fmt.Errorf("下载chunk出现错误: %v", err)
+		return fmt.Errorf("下载chunk出现错误: %w", err)
 	}
 
 	if err := c.wr.WriteDirect(ch.Category, ch.FileName, buf); err != nil {
@@ -178,10 +249,7 @@ func (c *CategoryDownloader) downloadChunkIteration(ch Chunk) error {
 	return nil
 }
 
-func (c *CategoryDownloader) listenAddrForChunk(ch Chunk) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultClientTimeout)
-	defer cancel()
-
+func (c *CategoryDownloader) listenAddrForChunk(ctx context.Context, ch Chunk) (string, error) {
 	peers, err := c.state.ListPeers(ctx)
 	if err != nil {
 		return "", err
@@ -202,8 +270,8 @@ func (c *CategoryDownloader) listenAddrForChunk(ch Chunk) (string, error) {
 	return "http://" + addr, nil
 }
 
-func (c *CategoryDownloader) getChunkInfo(addr string, curCh Chunk) (protocol.Chunk, error) {
-	chunks, err := c.s.ListChunks(curCh.Category, addr)
+func (c *CategoryDownloader) getChunkInfo(ctx context.Context, addr string, curCh Chunk) (protocol.Chunk, error) {
+	chunks, err := c.s.ListChunks(ctx, curCh.Category, addr, true)
 	if err != nil {
 		return protocol.Chunk{}, err
 	}
@@ -217,21 +285,37 @@ func (c *CategoryDownloader) getChunkInfo(addr string, curCh Chunk) (protocol.Ch
 	return protocol.Chunk{}, errNotFound
 }
 
-func (c *CategoryDownloader) downloadPart(addr string, ch Chunk, off int64) ([]byte, error) {
+func (c *CategoryDownloader) downloadPart(ctx context.Context, addr string, ch Chunk, off int64) ([]byte, error) {
 	u := url.Values{}
 	u.Add("off", strconv.Itoa(int(off)))
 	u.Add("maxSize", strconv.Itoa(batchSize))
 	u.Add("chunk", ch.FileName)
 	u.Add("category", ch.Category)
+	u.Add("from_replication", "1")
 
 	readURL := fmt.Sprintf("%s/read?%s", addr, u.Encode())
 
-	resp, err := c.httpCl.Get(readURL)
+	req, err := http.NewRequestWithContext(ctx, "GET", readURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating http request: %w", err)
+	}
+
+	resp, err := c.httpCl.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("read %q: %v", readURL, err)
 	}
 
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		defer io.Copy(io.Discard, resp.Body)
+
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, errNotFound
+		}
+
+		return nil, fmt.Errorf("http status code %d", resp.StatusCode)
+	}
 
 	var b bytes.Buffer
 	_, err = io.Copy(&b, resp.Body)

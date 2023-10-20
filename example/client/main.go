@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"github.com/yanyanran/yerfYar/client"
@@ -25,6 +26,7 @@ type readResult struct {
 
 func main() {
 	flag.Parse()
+	ctx := context.Background()
 	addrs := []string{"http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://10.30.0.154:8080"}
 
 	cl := client.NewSimple(addrs)
@@ -37,7 +39,7 @@ func main() {
 
 	fmt.Printf("在提示中输入消息以将其发送到yerkYar副本之一\n")
 
-	go printContinuously(cl)
+	go printContinuously(ctx, cl)
 
 	rd := bufio.NewReader(os.Stdin)
 	fmt.Printf("> ")
@@ -78,7 +80,7 @@ func main() {
 			log.Fatalf("该行不完整: %q", ln)
 		}
 
-		if err := cl.Send(*categoryName, []byte(ln)); err != nil {
+		if err := cl.Send(ctx, *categoryName, []byte(ln)); err != nil {
 			log.Printf("向yerkYar发送数据失败: %v", err)
 		}
 
@@ -96,11 +98,11 @@ func saveState(cl *client.Simple) {
 	fmt.Println("")
 }
 
-func printContinuously(cl *client.Simple) {
+func printContinuously(ctx context.Context, cl *client.Simple) {
 	scratch := make([]byte, 1024*1024)
 
 	for {
-		cl.Process(*categoryName, scratch, func(b []byte) error {
+		cl.Process(ctx, *categoryName, scratch, func(b []byte) error {
 			fmt.Printf("\n")
 			log.Printf("BATCH: %s", b)
 			fmt.Printf("> ")

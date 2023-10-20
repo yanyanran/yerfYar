@@ -8,6 +8,7 @@ import (
 	"github.com/yanyanran/yerfYar/server"
 	"github.com/yanyanran/yerfYar/server/replication"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -117,6 +118,19 @@ func (s *Server) ackHandler(ctx *fasthttp.RequestCtx) {
 }
 
 func (s *Server) readHandler(ctx *fasthttp.RequestCtx) {
+	chunk := ctx.QueryArgs().Peek("chunk") // 获取查询参数kv，peek查看参数第一个值
+	if len(chunk) == 0 {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString("错误的 `chunk` GET参数：必须提供chunk名称")
+		return
+	}
+
+	fromReplication, _ := ctx.QueryArgs().GetUint("from_replication")
+	if fromReplication == 1 {
+		// log.Printf("为chunk %v 的复制请求休眠 8 秒", string(chunk))
+		// time.Sleep(time.Second * 8)
+	}
+
 	storage, err := s.getStorageForCategory(string(ctx.QueryArgs().Peek("category")))
 	if err != nil {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
@@ -138,16 +152,13 @@ func (s *Server) readHandler(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	chunk := ctx.QueryArgs().Peek("chunk")
-	if len(chunk) == 0 {
-		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		ctx.WriteString("错误的 `chunk` GET参数: 必须提供chunk名称")
-		return
-	}
-
 	err = storage.Read(string(chunk), uint64(off), uint64(maxSize), ctx)
 	if err != nil && err != io.EOF {
-		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		if os.IsNotExist(err) {
+			ctx.SetStatusCode(fasthttp.StatusNotFound)
+		} else {
+			ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		}
 		ctx.WriteString(err.Error())
 		return
 	}
@@ -159,6 +170,12 @@ func (s *Server) listChunksHandler(ctx *fasthttp.RequestCtx) {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
 		ctx.WriteString(err.Error())
 		return
+	}
+
+	fromReplication, _ := ctx.QueryArgs().GetUint("from_replication")
+	if fromReplication == 1 {
+		// log.Printf("休眠 8 秒以响应来自复制的列出chunk的请求")
+		// time.Sleep(time.Second * 8)
 	}
 
 	chunks, err := storage.ListChunks()

@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,7 +60,7 @@ func (s *Simple) getAddr() string {
 	return s.addrs[addrIdx]
 }
 
-func (s *Simple) Send(category string, msgs []byte) error {
+func (s *Simple) Send(ctx context.Context, category string, msgs []byte) error {
 	u := url.Values{}
 	u.Add("category", category)
 
@@ -69,7 +70,13 @@ func (s *Simple) Send(category string, msgs []byte) error {
 		log.Printf("向 %s 发送以下消息: %q", url, msgs)
 	}
 
-	res, err := s.cl.Post(url, "application/octet-stream", bytes.NewReader(msgs))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(msgs))
+	if err != nil {
+		return fmt.Errorf("发起HTTP请求发生错误: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	res, err := s.cl.Do(req)
 	if err != nil {
 		return err
 	}
@@ -88,20 +95,20 @@ func (s *Simple) Send(category string, msgs []byte) error {
 // Process 等待新消息或出现问题时返回错误。
 // scratch缓冲区用于读取数据。
 // 仅当 processFn() 对于正在处理的数据没有返回错误时，读取偏移量才会提前。
-func (s *Simple) Process(category string, scratch []byte, processFn func([]byte) error) error {
+func (s *Simple) Process(ctx context.Context, category string, scratch []byte, processFn func([]byte) error) error {
 	if scratch == nil {
 		scratch = make([]byte, defaultScratchSize)
 	}
 	addr := s.getAddr()
 
 	if len(s.st.Offsets) == 0 {
-		if err := s.updateCurrentChunks(category, addr); err != nil {
+		if err := s.updateCurrentChunks(ctx, category, addr); err != nil {
 			return fmt.Errorf("updateCurrentChunk: %w", err)
 		}
 	}
 
 	for instance := range s.st.Offsets {
-		err := s.processInstance(addr, instance, category, scratch, processFn)
+		err := s.processInstance(ctx, addr, instance, category, scratch, processFn)
 		if errors.Is(err, io.EOF) {
 			continue
 		}
@@ -110,13 +117,13 @@ func (s *Simple) Process(category string, scratch []byte, processFn func([]byte)
 	return io.EOF
 }
 
-func (s *Simple) processInstance(addr, instance, category string, scratch []byte, processFn func([]byte) error) error {
+func (s *Simple) processInstance(ctx context.Context, addr, instance, category string, scratch []byte, processFn func([]byte) error) error {
 	for {
-		if err := s.updateCurrentChunks(category, addr); err != nil {
+		if err := s.updateCurrentChunks(ctx, category, addr); err != nil {
 			return fmt.Errorf("updateCurrentChunk: %w", err)
 		}
 
-		err := s.process(addr, instance, category, scratch, processFn)
+		err := s.process(ctx, addr, instance, category, scratch, processFn)
 		if err == errRetry {
 			if s.Debug {
 				log.Printf("正在重试读取类别 %q ...", category)
@@ -127,7 +134,7 @@ func (s *Simple) processInstance(addr, instance, category string, scratch []byte
 	}
 }
 
-func (s *Simple) process(addr, instance, category string, scratch []byte, processFn func([]byte) error) error {
+func (s *Simple) process(ctx context.Context, addr, instance, category string, scratch []byte, processFn func([]byte) error) error {
 	curCh := s.st.Offsets[instance]
 
 	u := url.Values{}
@@ -162,7 +169,7 @@ func (s *Simple) process(addr, instance, category string, scratch []byte, proces
 	// 读0个字节但没错，意味着按照约定文件结束
 	if b.Len() == 0 {
 		if !curCh.CurChunk.Complete {
-			if err := s.updateCurrentChunkCompleteStatus(curCh, instance, category, addr); err != nil {
+			if err := s.updateCurrentChunkCompleteStatus(ctx, curCh, instance, category, addr); err != nil {
 				return fmt.Errorf("updateCurrentChunkCompleteStatus: %v", err)
 			}
 			if !curCh.CurChunk.Complete {
@@ -203,8 +210,8 @@ func (s *Simple) process(addr, instance, category string, scratch []byte, proces
 	return err
 }
 
-func (s *Simple) updateCurrentChunks(category, addr string) error {
-	chunks, err := s.ListChunks(category, addr)
+func (s *Simple) updateCurrentChunks(ctx context.Context, category, addr string) error {
+	chunks, err := s.ListChunks(ctx, category, addr, false)
 	if err != nil {
 		return fmt.Errorf("listChunks failed: %v", err)
 	}
@@ -262,8 +269,8 @@ func (s *Simple) getOldestChunk(chunks []protocol.Chunk) protocol.Chunk {
 	return chunks[0]
 }
 
-func (s *Simple) updateCurrentChunkCompleteStatus(curCh *ReadOffset, instance, category, addr string) error {
-	chunks, err := s.ListChunks(category, addr)
+func (s *Simple) updateCurrentChunkCompleteStatus(ctx context.Context, curCh *ReadOffset, instance, category, addr string) error {
+	chunks, err := s.ListChunks(ctx, category, addr, false)
 	if err != nil {
 		return fmt.Errorf("listChunks failed: %v", err)
 	}
@@ -286,13 +293,21 @@ func (s *Simple) updateCurrentChunkCompleteStatus(curCh *ReadOffset, instance, c
 
 // ListChunks 返回相应yerkYar实例的chunk列表
 // TODO: 将其提取到一个单独的client中
-func (s *Simple) ListChunks(category, addr string) ([]protocol.Chunk, error) {
+func (s *Simple) ListChunks(ctx context.Context, category, addr string, fromReplication bool) ([]protocol.Chunk, error) {
 	u := url.Values{}
 	u.Add("category", category)
+	if fromReplication {
+		u.Add("from_replication", "1")
+	}
 
 	listURL := fmt.Sprintf("%s/listChunks?%s", addr, u.Encode())
 
-	resp, err := s.cl.Get(listURL)
+	req, err := http.NewRequestWithContext(ctx, "GET", listURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating new http request: %w", err)
+	}
+
+	resp, err := s.cl.Do(req)
 	if err != nil {
 		return nil, err
 	}
