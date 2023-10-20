@@ -243,7 +243,7 @@ func (s *OnDisk) Ack(ctx context.Context, chunk string, size uint64) error {
 func (s *OnDisk) AckDirect(chunk string) error {
 	chunkFilename := filepath.Join(s.dirname, chunk)
 
-	if err := os.Remove(chunkFilename); err != nil {
+	if err := os.Remove(chunkFilename); err != nil && !errors.Is(err, os.ErrNotExist) { // ack文件不存在时不警告
 		return fmt.Errorf("removing %q: %v", chunk, err)
 	}
 
