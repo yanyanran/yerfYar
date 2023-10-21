@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -146,13 +147,79 @@ func (c *CategoryDownloader) Loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case ch := <-c.eventsCh:
-			c.downloadChunk(ctx, ch)
+			c.downloadAllChunksUpTo(ctx, ch)
 
+			// 下载chunk成功，从复制队列删除对应的数据块
 			if err := c.state.DeleteChunkFromReplicationQueue(ctx, c.instanceName, ch); err != nil {
 				log.Printf("无法从复制队列中删除chunk %+v: %v", ch, err)
 			}
 		}
 	}
+}
+
+func (c *CategoryDownloader) downloadAllChunksUpTo(ctx context.Context, toReplicate Chunk) {
+	for {
+		err := c.downloadAllChunksUpToIteration(ctx, toReplicate)
+		if err != nil {
+			log.Printf("对chunk %+v 进行 downloadAllChunksUpToIteration 时出错: %v", toReplicate, err)
+
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			time.Sleep(retryTimeout)
+			continue
+		}
+
+		return
+	}
+}
+
+// downloadAllChunksUpTo 下载chunk，这些chunk要么是所请求的chunk，要么比所请求的chunk更旧
+// 我们可以无序接收chunk复制请求，但复制必须按序进行
+func (c *CategoryDownloader) downloadAllChunksUpToIteration(ctx context.Context, toReplicate Chunk) error {
+	addr, err := c.listenAddrForChunk(ctx, toReplicate)
+	if err != nil {
+		return fmt.Errorf("获取监听端口 listenAddrForChunk 时失败: %v", err)
+	}
+
+	chunks, err := c.s.ListChunks(ctx, toReplicate.Category, addr, true)
+	if err != nil {
+		return fmt.Errorf("列出 %q 中的chunk时失败: %v", addr, err)
+	}
+
+	var chunksToReplicate []protocol.Chunk
+	for _, ch := range chunks {
+		// Unicode编码逐个比较字符串
+		if ch.Name <= toReplicate.FileName {
+			chunksToReplicate = append(chunksToReplicate, ch)
+		}
+	}
+
+	// 对筛选出的数据块按名称排序
+	sort.Slice(chunksToReplicate, func(i, j int) bool {
+		return chunksToReplicate[i].Name < chunksToReplicate[j].Name
+	})
+
+	for _, ch := range chunksToReplicate {
+		size, exists, err := c.wr.Stat(toReplicate.Category, ch.Name)
+		if err != nil {
+			return fmt.Errorf("获取文件stat时出错: %v", err)
+		}
+
+		// TODO:测试下载空块
+		if !exists || ch.Size > uint64(size) || !ch.Complete { // 数据块不存在or不完整-> 下载
+			c.downloadChunk(ctx, Chunk{
+				Owner:    toReplicate.Owner,
+				Category: toReplicate.Category,
+				FileName: ch.Name,
+			})
+		}
+	}
+
+	return nil
 }
 
 func (c *CategoryDownloader) downloadChunk(parentCtx context.Context, ch Chunk) {

@@ -18,8 +18,8 @@ const maxFileChunkSize = 20 * 1024 * 1024 // bytes
 var errBufTooSmall = errors.New("the buffer is too small to contain a single message")
 
 type StorageHooks interface {
-	BeforeCreatingChunk(ctx context.Context, category string, fileName string) error
-	BeforeAckChunk(ctx context.Context, category string, fileName string) error
+	AfterCreatingChunk(ctx context.Context, category string, fileName string) error
+	AfterAcknowledgeChunk(ctx context.Context, category string, fileName string) error
 }
 
 type OnDisk struct {
@@ -29,10 +29,11 @@ type OnDisk struct {
 
 	repl StorageHooks
 
-	writeMu       sync.Mutex
-	lastChunk     string
-	lastChunkSize uint64
-	lastChunkIdx  uint64
+	writeMu                     sync.Mutex
+	lastChunk                   string
+	lastChunkSize               uint64
+	lastChunkIdx                uint64
+	lastChunkAddedToReplication bool
 
 	fpsMu sync.Mutex
 	fps   map[string]*os.File // 缓存已打开的文件描述符，以便在需要读或写文件块时可快速访问
@@ -91,20 +92,26 @@ func (s *OnDisk) Write(ctx context.Context, msgs []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
+	// new a chunk
 	if s.lastChunk == "" || (s.lastChunkSize+uint64(len(msgs)) > maxFileChunkSize) {
 		s.lastChunk = fmt.Sprintf("%s-chunk%09d", s.instanceName, s.lastChunkIdx)
 		s.lastChunkSize = 0
 		s.lastChunkIdx++
-
-		// 创建新chunk时，对新chunk完成在etcd的注册
-		if err := s.repl.BeforeCreatingChunk(ctx, s.category, s.lastChunk); err != nil {
-			return fmt.Errorf("before creating new chunk: %w", err)
-		}
+		s.lastChunkAddedToReplication = false
 	}
 
 	fp, err := s.getFileDescriptor(s.lastChunk, true)
 	if err != nil {
 		return err
+	}
+
+	// 当前chunk没有添加到复制队列中
+	if !s.lastChunkAddedToReplication {
+		if err := s.repl.AfterCreatingChunk(ctx, s.category, s.lastChunk); err != nil {
+			return fmt.Errorf("after creating new chunk: %w", err)
+		}
+
+		s.lastChunkAddedToReplication = true
 	}
 
 	_, err = fp.Write(msgs)
@@ -228,12 +235,12 @@ func (s *OnDisk) Ack(ctx context.Context, chunk string, size uint64) error {
 		return fmt.Errorf("文件未完全处理：提供的已处理大小 %d 小于 Chunk 文件大小 %d", size, fi.Size())
 	}
 
-	if err := s.repl.BeforeAckChunk(ctx, s.category, chunk); err != nil {
-		log.Printf("无法复制ack请求: %v", err)
-	}
-
 	if err := os.Remove(chunkFilename); err != nil {
 		return fmt.Errorf("removing %q: %v", chunk, err)
+	}
+
+	if err := s.repl.AfterAcknowledgeChunk(ctx, s.category, chunk); err != nil {
+		log.Printf("无法复制ack请求: %v", err)
 	}
 
 	s.forgetFileDescriptor(chunk)

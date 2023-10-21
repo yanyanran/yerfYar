@@ -18,7 +18,7 @@ func NewStorage(client *State, currentInstance string) *Storage {
 	}
 }
 
-func (s *Storage) BeforeCreatingChunk(ctx context.Context, category string, fileName string) error {
+func (s *Storage) AfterCreatingChunk(ctx context.Context, category string, fileName string) error {
 	peers, err := s.client.ListPeers(ctx)
 	if err != nil {
 		return fmt.Errorf("从 etcd 获取 peer: %v", err)
@@ -41,7 +41,7 @@ func (s *Storage) BeforeCreatingChunk(ctx context.Context, category string, file
 	return nil
 }
 
-func (s *Storage) BeforeAckChunk(ctx context.Context, category string, fileName string) error {
+func (s *Storage) AfterAcknowledgeChunk(ctx context.Context, category string, fileName string) error {
 	peers, err := s.client.ListPeers(ctx)
 	if err != nil {
 		return fmt.Errorf("从 etcd 获取 peers: %v", err)
