@@ -3,16 +3,19 @@ package replication
 import (
 	"context"
 	"fmt"
+	"log"
 )
 
 // Storage 为磁盘存储提供hooks，调用以确保复制chunk
 type Storage struct {
+	logger          *log.Logger
 	client          *State
 	currentInstance string
 }
 
-func NewStorage(client *State, currentInstance string) *Storage {
+func NewStorage(logger *log.Logger, client *State, currentInstance string) *Storage {
 	return &Storage{
+		logger:          logger,
 		client:          client,
 		currentInstance: currentInstance,
 	}

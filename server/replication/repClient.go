@@ -28,6 +28,8 @@ var errIncomplete = errors.New("chunk is not complete")
 
 // Client 描述复制的客户端状态并不断从其他服务器下载新chunk
 type Client struct {
+	logger *log.Logger
+
 	state        *State
 	wr           DirectWriter
 	instanceName string
@@ -39,6 +41,7 @@ type Client struct {
 }
 
 type CategoryDownloader struct {
+	logger   *log.Logger
 	eventsCh chan Chunk
 
 	state        *State
@@ -62,8 +65,9 @@ type DirectWriter interface {
 }
 
 // NewCompClient 初始化复制客户端
-func NewCompClient(st *State, wr DirectWriter, instanceName string) *Client {
+func NewCompClient(logger *log.Logger, st *State, wr DirectWriter, instanceName string) *Client {
 	return &Client{
+		logger:       logger,
 		state:        st,
 		wr:           wr,
 		instanceName: instanceName,
@@ -82,16 +86,16 @@ func (c *Client) Loop(ctx context.Context) {
 
 func (c *Client) ackLoop(ctx context.Context) {
 	for ch := range c.state.WatchAckQueue(ctx, c.instanceName) {
-		log.Printf("ack chunk %+v", ch)
+		c.logger.Printf("ack chunk %+v", ch)
 
 		c.ensureChunkIsNotBeingDownloaded(ch)
 
 		if err := c.wr.AckDirect(ctx, ch.Category, ch.FileName); err != nil {
-			log.Printf("无法从ack队列确认chunk %+v: %v", ch, err)
+			c.logger.Printf("无法从ack队列确认chunk %+v: %v", ch, err)
 		}
 
 		if err := c.state.DeleteChunkFromAckQueue(ctx, c.instanceName, ch); err != nil {
-			log.Printf("无法从ack队列中删除chunk %+v： %v", ch, err)
+			c.logger.Printf("无法从ack队列中删除chunk %+v： %v", ch, err)
 		}
 	}
 }
@@ -124,6 +128,7 @@ func (c *Client) replicationLoop(ctx context.Context) {
 		downloader, exist := c.perCategory[ch.Category]
 		if !exist {
 			downloader = &CategoryDownloader{
+				logger:       c.logger,
 				eventsCh:     make(chan Chunk, 3),
 				state:        c.state,
 				wr:           c.wr,
@@ -161,7 +166,7 @@ func (c *CategoryDownloader) downloadAllChunksUpTo(ctx context.Context, toReplic
 	for {
 		err := c.downloadAllChunksUpToIteration(ctx, toReplicate)
 		if err != nil {
-			log.Printf("对chunk %+v 进行 downloadAllChunksUpToIteration 时出错: %v", toReplicate, err)
+			c.logger.Printf("对chunk %+v 进行 downloadAllChunksUpToIteration 时出错: %v", toReplicate, err)
 
 			select {
 			case <-ctx.Done():
@@ -192,8 +197,9 @@ func (c *CategoryDownloader) downloadAllChunksUpToIteration(ctx context.Context,
 
 	var chunksToReplicate []protocol.Chunk
 	for _, ch := range chunks {
+		instance, _ := protocol.ParseChunkFileName(ch.Name)
 		// Unicode编码逐个比较字符串
-		if ch.Name <= toReplicate.FileName {
+		if instance == toReplicate.Owner && ch.Name <= toReplicate.FileName {
 			chunksToReplicate = append(chunksToReplicate, ch)
 		}
 	}
@@ -223,8 +229,8 @@ func (c *CategoryDownloader) downloadAllChunksUpToIteration(ctx context.Context,
 }
 
 func (c *CategoryDownloader) downloadChunk(parentCtx context.Context, ch Chunk) {
-	log.Printf("正在下载chunk %+v 中...", ch)
-	defer log.Printf("已完成chunk %+v 的下载", ch)
+	c.logger.Printf("正在下载chunk %+v 中...", ch)
+	defer c.logger.Printf("已完成chunk %+v 的下载", ch)
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
@@ -249,7 +255,7 @@ func (c *CategoryDownloader) downloadChunk(parentCtx context.Context, ch Chunk) 
 	for {
 		err := c.downloadChunkIteration(ctx, ch)
 		if errors.Is(err, errNotFound) {
-			log.Printf("下载chunk %+v 时出现未找到错误，正在跳过chunk", ch)
+			c.logger.Printf("下载chunk %+v 时出现未找到错误，正在跳过chunk", ch)
 			return
 		} else if errors.Is(err, errIncomplete) {
 			err := c.downloadChunkIteration(ctx, ch)
@@ -257,7 +263,7 @@ func (c *CategoryDownloader) downloadChunk(parentCtx context.Context, ch Chunk) 
 				time.Sleep(pollInterval)
 				continue
 			} else if err != nil {
-				log.Printf("下载chunk %+v 时出现了错误: %v", ch, err)
+				c.logger.Printf("下载chunk %+v 时出现了错误: %v", ch, err)
 
 				select {
 				case <-ctx.Done():

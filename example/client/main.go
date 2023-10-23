@@ -1,18 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"github.com/yanyanran/yerfYar/client"
-	"io"
 	"io/ioutil"
 	"log"
-	"os"
-	"os/signal"
-	"strings"
-	"syscall"
+	"time"
 )
 
 const simpleStateFilePath = "/tmp/simple-example-state-%s.json"
@@ -27,7 +22,7 @@ type readResult struct {
 func main() {
 	flag.Parse()
 	ctx := context.Background()
-	addrs := []string{"http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://10.30.0.154:8080"}
+	addrs := []string{"http://127.0.0.1:8080"}
 
 	cl := client.NewSimple(addrs)
 	if buf, err := ioutil.ReadFile(fmt.Sprintf(simpleStateFilePath, *categoryName)); err == nil {
@@ -35,57 +30,67 @@ func main() {
 			log.Printf("无法恢复保存的客户端状态: %v", err)
 		}
 	}
-	cl.Debug = true
+	cl.Debug = false
 
 	fmt.Printf("在提示中输入消息以将其发送到yerkYar副本之一\n")
-
-	go printContinuously(ctx, cl)
-
-	rd := bufio.NewReader(os.Stdin)
-	fmt.Printf("> ")
-
-	sigCh := make(chan os.Signal, 5)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-
-	readCh := make(chan readResult)
-	go func() {
-		for {
-			ln, err := rd.ReadString('\n')
-			readCh <- readResult{ln: ln, err: err}
-		}
-	}()
-
-	for {
-		var ln string
-		var err error
-
-		select {
-		case s := <-sigCh:
-			log.Printf("接收到信号： %v", s)
-			ln = ""
-			err = io.EOF
-		case r := <-readCh:
-			ln = r.ln
-			err = r.err
-		}
-
-		if err == io.EOF {
-			saveState(cl)
-			return
-		} else if err != nil {
-			log.Fatalf("读取失败: %v", err)
-		}
-
-		if !strings.HasSuffix(ln, "\n") {
-			log.Fatalf("该行不完整: %q", ln)
-		}
-
-		if err := cl.Send(ctx, *categoryName, []byte(ln)); err != nil {
-			log.Printf("向yerkYar发送数据失败: %v", err)
-		}
-
+	scratch := make([]byte, 1024*1024)
+	err := cl.Process(ctx, *categoryName, scratch, func(b []byte) error {
+		fmt.Printf("\n")
+		log.Printf("BATCH: %s", b)
 		fmt.Printf("> ")
+		return nil
+	})
+	if err != nil {
+		fmt.Println(err)
 	}
+
+	//go printContinuously(ctx, cl)
+	//
+	//rd := bufio.NewReader(os.Stdin)
+	//fmt.Printf("> ")
+	//
+	//sigCh := make(chan os.Signal, 5)
+	//signal.Notify(sigCh, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	//
+	//readCh := make(chan readResult)
+	//go func() {
+	//	for {
+	//		ln, err := rd.ReadString('\n')
+	//		readCh <- readResult{ln: ln, err: err}
+	//	}
+	//}()
+	//
+	//for {
+	//	var ln string
+	//	var err error
+	//
+	//	select {
+	//	case s := <-sigCh:
+	//		log.Printf("接收到信号： %v", s)
+	//		ln = ""
+	//		err = io.EOF
+	//	case r := <-readCh:
+	//		ln = r.ln
+	//		err = r.err
+	//	}
+	//
+	//	if err == io.EOF {
+	//		saveState(cl)
+	//		return
+	//	} else if err != nil {
+	//		log.Fatalf("读取失败: %v", err)
+	//	}
+	//
+	//	if !strings.HasSuffix(ln, "\n") {
+	//		log.Fatalf("该行不完整: %q", ln)
+	//	}
+	//
+	//	if err := cl.Send(ctx, *categoryName, []byte(ln)); err != nil {
+	//		log.Printf("向yerkYar发送数据失败: %v", err)
+	//	}
+	//
+	//	fmt.Printf("> ")
+	//}
 }
 
 func saveState(cl *client.Simple) {
@@ -102,17 +107,20 @@ func printContinuously(ctx context.Context, cl *client.Simple) {
 	scratch := make([]byte, 1024*1024)
 
 	for {
-		cl.Process(ctx, *categoryName, scratch, func(b []byte) error {
+		err := cl.Process(ctx, *categoryName, scratch, func(b []byte) error {
 			fmt.Printf("\n")
 			log.Printf("BATCH: %s", b)
 			fmt.Printf("> ")
 			return nil
 		})
+		if err != nil {
+			fmt.Println(err)
+		}
 
-		//if cl.Debug {
-		//	time.Sleep(time.Millisecond * 10000)
-		//} else {
-		//	time.Sleep(time.Millisecond * 100)
-		//}
+		if cl.Debug {
+			time.Sleep(time.Millisecond * 10000)
+		} else {
+			time.Sleep(time.Millisecond * 100)
+		}
 	}
 }

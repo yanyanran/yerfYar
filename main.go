@@ -4,6 +4,7 @@ import (
 	"flag"
 	"github.com/yanyanran/yerfYar/integration"
 	"log"
+	"os"
 	"strings"
 )
 
@@ -35,6 +36,7 @@ func main() {
 	}
 
 	a := integration.InitArgs{
+		LogWriter:    os.Stderr,
 		EtcdAddr:     strings.Split(*etcdAddr, ","),
 		ClusterName:  *clusterName,
 		InstanceName: *instanceName,

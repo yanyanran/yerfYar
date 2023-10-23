@@ -15,6 +15,7 @@ const defaultTimeout = 10 * time.Second
 
 // State 用于存储有关复制状态信息的持久kv存储包装器
 type State struct {
+	logger *log.Logger
 	cl     *clientv3.Client
 	prefix string
 }
@@ -38,7 +39,7 @@ type Chunk struct {
 type Option clientv3.OpOption
 
 // NewState 初始化与etcd集群的连接
-func NewState(addr []string, clusterName string) (*State, error) {
+func NewState(logger *log.Logger, addr []string, clusterName string) (*State, error) {
 	etcdClient, err := clientv3.New(clientv3.Config{
 		Endpoints:   addr,
 		DialTimeout: defaultTimeout,
@@ -56,6 +57,7 @@ func NewState(addr []string, clusterName string) (*State, error) {
 	}
 
 	return &State{
+		logger: logger,
 		cl:     etcdClient,
 		prefix: "yerkYar/" + clusterName + "/",
 	}, nil
@@ -166,7 +168,7 @@ func (c *State) watchQueue(ctx context.Context, queueName string, instanceName s
 		resp, err := c.cl.Get(ctx, prefix, clientv3.WithPrefix())
 		// TODO: 更好地处理错误
 		if err != nil {
-			log.Printf("etcd 列表key失败（某些chunk将无法下载）: %v", err)
+			c.logger.Printf("etcd 列表key失败（某些chunk将无法下载）: %v", err)
 			return
 		}
 
@@ -174,7 +176,7 @@ func (c *State) watchQueue(ctx context.Context, queueName string, instanceName s
 			// 解析成chunk结构放入chan中
 			ch, err := c.parseReplicationKey(prefix, (*mvccpb.KeyValue)(kv))
 			if err != nil {
-				log.Printf("parseReplicationKey错误： %v", err)
+				c.logger.Printf("parseReplicationKey错误： %v", err)
 				continue
 			}
 
@@ -187,7 +189,7 @@ func (c *State) watchQueue(ctx context.Context, queueName string, instanceName s
 		for resp := range c.cl.Watch(clientv3.WithRequireLeader(ctx), prefix, clientv3.WithPrefix()) {
 			// TODO: 更好地处理错误
 			if err := resp.Err(); err != nil {
-				log.Printf("etcd watch错误: %v", err)
+				c.logger.Printf("etcd watch错误: %v", err)
 				return
 			}
 

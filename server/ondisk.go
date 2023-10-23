@@ -23,6 +23,8 @@ type StorageHooks interface {
 }
 
 type OnDisk struct {
+	logger *log.Logger
+
 	dirname      string
 	category     string
 	instanceName string
@@ -39,8 +41,9 @@ type OnDisk struct {
 	fps   map[string]*os.File // 缓存已打开的文件描述符，以便在需要读或写文件块时可快速访问
 }
 
-func NewOnDisk(dirname, category, instanceName string, repl StorageHooks) (*OnDisk, error) {
+func NewOnDisk(logger *log.Logger, dirname, category, instanceName string, repl StorageHooks) (*OnDisk, error) {
 	s := &OnDisk{
+		logger:       logger,
 		dirname:      dirname,
 		category:     category,
 		instanceName: instanceName,
@@ -137,7 +140,7 @@ func (s *OnDisk) getFileDescriptor(chunk string, write bool) (*os.File, error) {
 	filename := filepath.Join(s.dirname, chunk)
 	fp, err := os.OpenFile(filename, fl, 0666)
 	if err != nil {
-		return nil, fmt.Errorf("create file %q: %s", filename, err)
+		return nil, fmt.Errorf("create file %q: %w", filename, err)
 	}
 
 	s.fps[chunk] = fp
@@ -167,7 +170,7 @@ func (s *OnDisk) Read(chunk string, offset uint64, maxSize uint64, w io.Writer) 
 
 	fp, err := s.getFileDescriptor(chunk, false)
 	if err != nil {
-		return fmt.Errorf("getFileDescriptor(%q): %v", chunk, err)
+		return fmt.Errorf("getFileDescriptor(%q): %w", chunk, err)
 	}
 
 	buf := make([]byte, maxSize)
@@ -240,7 +243,7 @@ func (s *OnDisk) Ack(ctx context.Context, chunk string, size uint64) error {
 	}
 
 	if err := s.repl.AfterAcknowledgeChunk(ctx, s.category, chunk); err != nil {
-		log.Printf("无法复制ack请求: %v", err)
+		s.logger.Printf("无法复制ack请求: %v", err)
 	}
 
 	s.forgetFileDescriptor(chunk)

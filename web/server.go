@@ -8,12 +8,14 @@ import (
 	"github.com/yanyanran/yerfYar/server"
 	"github.com/yanyanran/yerfYar/server/replication"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
 type Server struct {
+	logger       *log.Logger
 	instanceName string
 	dirname      string
 	listenAddr   string
@@ -26,8 +28,9 @@ type Server struct {
 
 type GetOnDiskFn func(category string) (*server.OnDisk, error)
 
-func NewServer(replClient *replication.State, instanceName string, dirname string, listenAddr string, replStorage *replication.Storage, getOnDisk GetOnDiskFn) *Server {
+func NewServer(logger *log.Logger, replClient *replication.State, instanceName string, dirname string, listenAddr string, replStorage *replication.Storage, getOnDisk GetOnDiskFn) *Server {
 	return &Server{
+		logger:       logger,
 		instanceName: instanceName,
 		dirname:      dirname,
 		listenAddr:   listenAddr,
@@ -127,7 +130,7 @@ func (s *Server) readHandler(ctx *fasthttp.RequestCtx) {
 
 	fromReplication, _ := ctx.QueryArgs().GetUint("from_replication")
 	if fromReplication == 1 {
-		// log.Printf("为chunk %v 的复制请求休眠 8 秒", string(chunk))
+		// c.logger.Printf("为chunk %v 的复制请求休眠 8 秒", string(chunk))
 		// time.Sleep(time.Second * 8)
 	}
 
@@ -154,7 +157,7 @@ func (s *Server) readHandler(ctx *fasthttp.RequestCtx) {
 
 	err = storage.Read(string(chunk), uint64(off), uint64(maxSize), ctx)
 	if err != nil && err != io.EOF {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			ctx.SetStatusCode(fasthttp.StatusNotFound)
 		} else {
 			ctx.SetStatusCode(fasthttp.StatusInternalServerError)
@@ -174,7 +177,7 @@ func (s *Server) listChunksHandler(ctx *fasthttp.RequestCtx) {
 
 	fromReplication, _ := ctx.QueryArgs().GetUint("from_replication")
 	if fromReplication == 1 {
-		// log.Printf("休眠 8 秒以响应来自复制的列出chunk的请求")
+		// c.logger.Printf("休眠 8 秒以响应来自复制的列出chunk的请求")
 		// time.Sleep(time.Second * 8)
 	}
 

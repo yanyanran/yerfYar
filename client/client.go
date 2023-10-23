@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/yanyanran/yerfYar/protocol"
 	"io"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
@@ -31,7 +32,9 @@ type state struct {
 }
 
 type Simple struct {
-	Debug bool
+	Debug  bool
+	Logger *log.Logger
+
 	addrs []string
 	cl    *http.Client
 	st    *state
@@ -60,6 +63,13 @@ func (s *Simple) getAddr() string {
 	return s.addrs[addrIdx]
 }
 
+func (s *Simple) logger() *log.Logger {
+	if s.Logger == nil {
+		return log.Default()
+	}
+	return s.Logger
+}
+
 func (s *Simple) Send(ctx context.Context, category string, msgs []byte) error {
 	u := url.Values{}
 	u.Add("category", category)
@@ -67,7 +77,11 @@ func (s *Simple) Send(ctx context.Context, category string, msgs []byte) error {
 	url := s.getAddr() + "/write?" + u.Encode()
 
 	if s.Debug {
-		log.Printf("向 %s 发送以下消息: %q", url, msgs)
+		debugMsgs := msgs
+		if len(debugMsgs) > 128 {
+			debugMsgs = []byte(fmt.Sprintf("%s...（总共 %d 字节）", msgs[0:128], len(msgs)))
+		}
+		s.logger().Printf("向 %s 发送以下消息: %q", url, msgs)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(msgs))
@@ -126,7 +140,7 @@ func (s *Simple) processInstance(ctx context.Context, addr, instance, category s
 		err := s.process(ctx, addr, instance, category, scratch, processFn)
 		if err == errRetry {
 			if s.Debug {
-				log.Printf("正在重试读取类别 %q ...", category)
+				s.logger().Printf("正在重试读取类别 %q ...(获取到错误：%v)", category, err)
 			}
 			continue
 		}
@@ -146,7 +160,7 @@ func (s *Simple) process(ctx context.Context, addr, instance, category string, s
 	readURL := fmt.Sprintf("%s/read?%s", addr, u.Encode())
 
 	if s.Debug {
-		log.Printf("从 %s 读取", readURL)
+		s.logger().Printf("从 %s 读取", readURL)
 	}
 
 	res, err := s.cl.Get(readURL)
@@ -155,10 +169,16 @@ func (s *Simple) process(ctx context.Context, addr, instance, category string, s
 	}
 	defer res.Body.Close()
 
-	if res.StatusCode != http.StatusOK {
+	// 如果chunk不存在但通过ListChunks()获得了它，则意味着该chunk尚未复制到该服务器
+	if res.StatusCode == http.StatusNotFound {
+		// TODO: 更好地处理丢失的chunk
+		io.Copy(ioutil.Discard, res.Body)
+		s.logger().Printf("chunk %+v 在 %q 处丢失，可能没复制，跳过", curCh.CurChunk, addr)
+		return nil
+	} else if res.StatusCode != http.StatusOK {
 		var b bytes.Buffer
 		io.Copy(&b, res.Body)
-		return fmt.Errorf("http code %d, %s", res.StatusCode, b.String())
+		return fmt.Errorf("GET %q: http code %d, %s", readURL, res.StatusCode, b.String())
 	}
 	b := bytes.NewBuffer(scratch[0:0])
 	_, err = io.Copy(b, res.Body)
@@ -177,6 +197,7 @@ func (s *Simple) process(ctx context.Context, addr, instance, category string, s
 				if curCh.Offset >= curCh.CurChunk.Size {
 					return io.EOF
 				}
+			} else {
 				// 在我们发送读取请求和chunk Complete间出现了新数据
 				return errRetry
 			}
@@ -184,6 +205,10 @@ func (s *Simple) process(ctx context.Context, addr, instance, category string, s
 
 		// 该chunk已被标记完成，但在发送读取请求和chunk Complete之间出现了新数据
 		if curCh.Offset < curCh.CurChunk.Size {
+			if s.Debug {
+				s.logger().Printf(`errRetry：chunk %q 已标记为完成。然而在发送读取请求和chunk完成之间出现了新数据。 (curCh.Off < curCh.CurChunk.Size) = (%v < %v)`,
+					curCh.CurChunk.Name, curCh.Offset, curCh.CurChunk.Size)
+			}
 			return errRetry
 		}
 
@@ -198,6 +223,10 @@ func (s *Simple) process(ctx context.Context, addr, instance, category string, s
 		curCh.Offset = 0
 
 		s.st.Offsets[instance] = curCh
+
+		if s.Debug {
+			s.logger().Printf(`errRetry: 需要读取下一个chunk，这样就不会返回空响应`)
+		}
 		return errRetry
 	}
 
@@ -211,6 +240,9 @@ func (s *Simple) process(ctx context.Context, addr, instance, category string, s
 }
 
 func (s *Simple) updateCurrentChunks(ctx context.Context, category, addr string) error {
+	for _, v := range s.st.Offsets {
+		fmt.Println(v.Offset)
+	}
 	chunks, err := s.ListChunks(ctx, category, addr, false)
 	if err != nil {
 		return fmt.Errorf("listChunks failed: %v", err)
@@ -218,6 +250,9 @@ func (s *Simple) updateCurrentChunks(ctx context.Context, category, addr string)
 
 	if len(chunks) == 0 {
 		return io.EOF
+	}
+	for _, v := range s.st.Offsets {
+		fmt.Println(v.Offset)
 	}
 
 	chunksByInstance := make(map[string][]protocol.Chunk)
@@ -326,6 +361,11 @@ func (s *Simple) ListChunks(ctx context.Context, category, addr string, fromRepl
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 		return nil, err
 	}
+
+	if s.Debug {
+		s.logger().Printf("ListChunks(%q) returned %+v", addr, res)
+	}
+
 	return res, nil
 }
 
