@@ -117,7 +117,7 @@ func (s *Simple) Process(ctx context.Context, category string, scratch []byte, p
 
 	if len(s.st.Offsets) == 0 {
 		if err := s.updateCurrentChunks(ctx, category, addr); err != nil {
-			return fmt.Errorf("updateCurrentChunk: %w", err)
+			return fmt.Errorf("[Process]updateCurrentChunk: %w", err)
 		}
 	}
 
@@ -134,7 +134,7 @@ func (s *Simple) Process(ctx context.Context, category string, scratch []byte, p
 func (s *Simple) processInstance(ctx context.Context, addr, instance, category string, scratch []byte, processFn func([]byte) error) error {
 	for {
 		if err := s.updateCurrentChunks(ctx, category, addr); err != nil {
-			return fmt.Errorf("updateCurrentChunk: %w", err)
+			return fmt.Errorf("[processInstance]updateCurrentChunk: %w", err)
 		}
 
 		err := s.process(ctx, addr, instance, category, scratch, processFn)
@@ -240,9 +240,6 @@ func (s *Simple) process(ctx context.Context, addr, instance, category string, s
 }
 
 func (s *Simple) updateCurrentChunks(ctx context.Context, category, addr string) error {
-	for _, v := range s.st.Offsets {
-		fmt.Println(v.Offset)
-	}
 	chunks, err := s.ListChunks(ctx, category, addr, false)
 	if err != nil {
 		return fmt.Errorf("listChunks failed: %v", err)
@@ -250,9 +247,6 @@ func (s *Simple) updateCurrentChunks(ctx context.Context, category, addr string)
 
 	if len(chunks) == 0 {
 		return io.EOF
-	}
-	for _, v := range s.st.Offsets {
-		fmt.Println(v.Offset)
 	}
 
 	chunksByInstance := make(map[string][]protocol.Chunk)
