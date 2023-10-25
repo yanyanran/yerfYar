@@ -10,12 +10,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
-// TODO: 限制msg的最大大小
-const maxFileChunkSize = 20 * 1024 * 1024 // bytes
 var errBufTooSmall = errors.New("the buffer is too small to contain a single message")
+
+const DeletedSuffix = ".deleted"
 
 type StorageHooks interface {
 	AfterCreatingChunk(ctx context.Context, category string, fileName string) error
@@ -28,6 +29,7 @@ type OnDisk struct {
 	dirname      string
 	category     string
 	instanceName string
+	maxChunkSize uint64
 
 	repl StorageHooks
 
@@ -41,13 +43,14 @@ type OnDisk struct {
 	fps   map[string]*os.File // 缓存已打开的文件描述符，以便在需要读或写文件块时可快速访问
 }
 
-func NewOnDisk(logger *log.Logger, dirname, category, instanceName string, repl StorageHooks) (*OnDisk, error) {
+func NewOnDisk(logger *log.Logger, dirname, category, instanceName string, maxChunkSize uint64, repl StorageHooks) (*OnDisk, error) {
 	s := &OnDisk{
 		logger:       logger,
 		dirname:      dirname,
 		category:     category,
 		instanceName: instanceName,
 		repl:         repl,
+		maxChunkSize: maxChunkSize,
 		fps:          make(map[string]*os.File),
 	}
 
@@ -96,7 +99,7 @@ func (s *OnDisk) Write(ctx context.Context, msgs []byte) error {
 	defer s.writeMu.Unlock()
 
 	// new a chunk
-	if s.lastChunk == "" || (s.lastChunkSize+uint64(len(msgs)) > maxFileChunkSize) {
+	if s.lastChunk == "" || (s.lastChunkSize+uint64(len(msgs)) > s.maxChunkSize) {
 		s.lastChunk = fmt.Sprintf("%s-chunk%09d", s.instanceName, s.lastChunkIdx)
 		s.lastChunkSize = 0
 		s.lastChunkIdx++
@@ -134,7 +137,7 @@ func (s *OnDisk) getFileDescriptor(chunk string, write bool) (*os.File, error) {
 
 	fl := os.O_RDONLY
 	if write {
-		fl = os.O_CREATE | os.O_RDWR | os.O_EXCL
+		fl = os.O_RDWR | os.O_CREATE | os.O_EXCL
 	}
 
 	filename := filepath.Join(s.dirname, chunk)
@@ -238,8 +241,8 @@ func (s *OnDisk) Ack(ctx context.Context, chunk string, size uint64) error {
 		return fmt.Errorf("文件未完全处理：提供的已处理大小 %d 小于 Chunk 文件大小 %d", size, fi.Size())
 	}
 
-	if err := os.Remove(chunkFilename); err != nil {
-		return fmt.Errorf("removing %q: %v", chunk, err)
+	if err := s.doAckChunk(chunk); err != nil {
+		return fmt.Errorf("ack %q: %v", chunk, err)
 	}
 
 	if err := s.repl.AfterAcknowledgeChunk(ctx, s.category, chunk); err != nil {
@@ -250,10 +253,28 @@ func (s *OnDisk) Ack(ctx context.Context, chunk string, size uint64) error {
 	return nil
 }
 
-func (s *OnDisk) AckDirect(chunk string) error {
+func (s *OnDisk) doAckChunk(chunk string) error {
 	chunkFilename := filepath.Join(s.dirname, chunk)
 
-	if err := os.Remove(chunkFilename); err != nil && !errors.Is(err, os.ErrNotExist) { // ack文件不存在时不警告
+	fp, err := os.OpenFile(chunkFilename, os.O_WRONLY, 0666)
+	if err != nil {
+		return fmt.Errorf("无法获取chunk %q 的ack操作的文件描述符：%v", chunk, err)
+	}
+	defer fp.Close()
+
+	if err := fp.Truncate(0); err != nil {
+		return fmt.Errorf("未能截断文件 %q: %v", chunk, err)
+	}
+
+	if err := os.Rename(chunkFilename, chunkFilename+DeletedSuffix); err != nil {
+		return fmt.Errorf("无法将文件 %q 重命名为已删除形式：%v", chunk, err)
+	}
+
+	return nil
+}
+
+func (s *OnDisk) AckDirect(chunk string) error {
+	if err := s.doAckChunk(chunk); err != nil && !errors.Is(err, os.ErrNotExist) { // ack文件不存在时不警告
 		return fmt.Errorf("removing %q: %v", chunk, err)
 	}
 
@@ -275,6 +296,10 @@ func (s *OnDisk) ListChunks() ([]protocol.Chunk, error) {
 			continue
 		} else if err != nil {
 			return nil, fmt.Errorf("reading directory: %v", err)
+		}
+
+		if strings.HasSuffix(di.Name(), DeletedSuffix) { // 检查di.Name()是否以DeletedSuffix结尾
+			continue
 		}
 
 		instanceName, _ := protocol.ParseChunkFileName(di.Name())

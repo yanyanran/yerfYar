@@ -59,7 +59,7 @@ type CategoryDownloader struct {
 
 // DirectWriter 直接写入基础存储以进行复制
 type DirectWriter interface {
-	Stat(category string, fileName string) (size int64, exists bool, err error)
+	Stat(category string, fileName string) (size int64, exists bool, deleted bool, err error)
 	WriteDirect(category string, fileName string, contents []byte) error
 	AckDirect(ctx context.Context, category string, chunk string) error
 }
@@ -79,8 +79,10 @@ func NewCompClient(logger *log.Logger, st *State, wr DirectWriter, instanceName 
 	}
 }
 
-func (c *Client) Loop(ctx context.Context) {
-	go c.ackLoop(ctx)
+func (c *Client) Loop(ctx context.Context, disableAcknowledge bool) {
+	if !disableAcknowledge {
+		go c.ackLoop(ctx)
+	}
 	c.replicationLoop(ctx)
 }
 
@@ -210,9 +212,13 @@ func (c *CategoryDownloader) downloadAllChunksUpToIteration(ctx context.Context,
 	})
 
 	for _, ch := range chunksToReplicate {
-		size, exists, err := c.wr.Stat(toReplicate.Category, ch.Name)
+		size, exists, deleted, err := c.wr.Stat(toReplicate.Category, ch.Name)
 		if err != nil {
 			return fmt.Errorf("获取文件stat时出错: %v", err)
+		}
+
+		if deleted { // 不要重新下载已ack的chunk
+			continue
 		}
 
 		// TODO:测试下载空块
@@ -281,7 +287,7 @@ func (c *CategoryDownloader) downloadChunk(parentCtx context.Context, ch Chunk) 
 }
 
 func (c *CategoryDownloader) downloadChunkIteration(ctx context.Context, ch Chunk) error {
-	size, _, err := c.wr.Stat(ch.Category, ch.FileName)
+	size, _, _, err := c.wr.Stat(ch.Category, ch.FileName)
 	if err != nil {
 		return fmt.Errorf("获取文件信息state时出现错误: %v", err)
 	}
@@ -315,7 +321,7 @@ func (c *CategoryDownloader) downloadChunkIteration(ctx context.Context, ch Chun
 		return fmt.Errorf("写chunk时出现错误: %v", err)
 	}
 
-	size, _, err = c.wr.Stat(ch.Category, ch.FileName)
+	size, _, _, err = c.wr.Stat(ch.Category, ch.FileName)
 	if err != nil {
 		return fmt.Errorf("获取文件stat: %v", err)
 	}

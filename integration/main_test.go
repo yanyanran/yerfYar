@@ -53,47 +53,21 @@ func TestSimpleClientWithReplicationConcurrently(t *testing.T) {
 }
 
 // 更细粒度的测试
-func simpleClientAndServerTest(t *testing.T, concurrent, withReplica bool) {
-	t.Helper()
-
-	log.SetFlags(log.Flags() | log.Lmicroseconds)
-
-	ctx := context.Background()
+func runEtcd(t *testing.T) (etcdPort int) {
+	etcdPath, err := os.MkdirTemp(t.TempDir(), "etcd")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir for etcd: %v", err)
+	}
 
 	etcdPeerPort, err := freeport.GetFreePort()
 	if err != nil {
 		t.Fatalf("Failed to get free port for etcd peer: %v", err)
 	}
 
-	etcdPort, err := freeport.GetFreePort()
+	etcdPort, err = freeport.GetFreePort()
 	if err != nil {
 		t.Fatalf("Failed to get free port for etcd: %v", err)
 	}
-
-	port1, err := freeport.GetFreePort()
-	if err != nil {
-		t.Fatalf("Failed to get free port: %v", err)
-	}
-
-	port2, err := freeport.GetFreePort()
-	if err != nil {
-		t.Fatalf("Failed to get free port: %v", err)
-	}
-
-	etcdPath, err := os.MkdirTemp(t.TempDir(), "etcd")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir for etcd: %v", err)
-	}
-
-	dbPath, err := os.MkdirTemp(t.TempDir(), "yerkYar-hah")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-
-	categoryPath := filepath.Join(dbPath, "numbers")
-	os.MkdirAll(categoryPath, 0777)
-
-	ioutil.WriteFile(filepath.Join(categoryPath, fmt.Sprintf("moscow-chunk%09d", 1)), []byte("12345\n"), 0666)
 
 	etcdArgs := []string{"--data-dir", etcdPath,
 		"--listen-client-urls", fmt.Sprintf("http://localhost:%d", etcdPort),
@@ -114,14 +88,46 @@ func simpleClientAndServerTest(t *testing.T, concurrent, withReplica bool) {
 
 	waitForPort(t, etcdPort, make(chan error, 1))
 
-	var addrs []string
+	return etcdPort
+}
+
+type tweaks struct {
+	dbInitFn       func(t *testing.T, dbPath string)
+	modifyInitArgs func(t *testing.T, a *InitArgs)
+}
+
+func runChukcha(t *testing.T, withReplica bool, w tweaks) (addrs []string, etcdAddr string) {
+	t.Helper()
+
+	log.SetFlags(log.Flags() | log.Lmicroseconds)
+
+	port1, err := freeport.GetFreePort()
+	if err != nil {
+		t.Fatalf("Failed to get free port: %v", err)
+	}
+
+	port2, err := freeport.GetFreePort()
+	if err != nil {
+		t.Fatalf("Failed to get free port: %v", err)
+	}
+
+	dbPath, err := os.MkdirTemp(t.TempDir(), "yerkYar-moscow")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+
+	if w.dbInitFn != nil {
+		w.dbInitFn(t, dbPath)
+	}
+
+	etcdAddr = fmt.Sprintf("http://localhost:%d/", runEtcd(t))
 	ports := []int{port1}
 	if withReplica {
 		ports = append(ports, port2)
 	}
 
 	for _, port := range ports {
-		log.Printf("Running chukcha on port %d", port)
+		log.Printf("Running yerkYar on port %d", port)
 
 		dirName := dbPath
 		instanceName := "moscow"
@@ -130,7 +136,7 @@ func simpleClientAndServerTest(t *testing.T, concurrent, withReplica bool) {
 		if port != port1 {
 			instanceName = "voronezh"
 
-			dirName, err = os.MkdirTemp(t.TempDir(), "chukcha-"+instanceName)
+			dirName, err = os.MkdirTemp(t.TempDir(), "yerkYar-"+instanceName)
 			if err != nil {
 				t.Fatalf("Failed to create temp dir: %v", err)
 			}
@@ -138,21 +144,46 @@ func simpleClientAndServerTest(t *testing.T, concurrent, withReplica bool) {
 
 		errCh := make(chan error, 1)
 		go func(port int) {
-			errCh <- InitAndServe(InitArgs{
+			a := InitArgs{
 				LogWriter:    log.Default().Writer(),
-				EtcdAddr:     []string{fmt.Sprintf("http://localhost:%d/", etcdPort)},
+				EtcdAddr:     []string{etcdAddr},
 				InstanceName: instanceName,
 				ClusterName:  "testRussia",
 				DirName:      dirName,
 				ListenAddr:   fmt.Sprintf("localhost:%d", port),
-			})
+				MaxChunkSize: 20 * 1024 * 1024,
+			}
+
+			if w.modifyInitArgs != nil {
+				w.modifyInitArgs(t, &a)
+			}
+
+			errCh <- InitAndServe(a)
 		}(port)
 
-		log.Printf("Waiting for the Chukcha port localhost:%d to open", port)
+		log.Printf("Waiting for the yerfYar port localhost:%d to open", port)
 		waitForPort(t, port, make(chan error, 1))
 
 		addrs = append(addrs, fmt.Sprintf("http://localhost:%d", port))
 	}
+
+	return addrs, etcdAddr
+}
+
+func simpleClientAndServerTest(t *testing.T, concurrent, withReplica bool) {
+	t.Helper()
+
+	ctx := context.Background()
+
+	addrs, _ := runChukcha(t, withReplica, tweaks{
+		dbInitFn: func(t *testing.T, dbPath string) {
+			categoryPath := filepath.Join(dbPath, "numbers")
+			os.MkdirAll(categoryPath, 0777)
+
+			// 使用不易猜测的内容初始化数据库内容，写入此目录时必须保留这些内容。
+			ioutil.WriteFile(filepath.Join(categoryPath, fmt.Sprintf("moscow-chunk%09d", 1)), []byte("12345\n"), 0666)
+		},
+	})
 
 	log.Printf("Starting the test")
 
@@ -160,6 +191,7 @@ func simpleClientAndServerTest(t *testing.T, concurrent, withReplica bool) {
 	// s.Debug = true
 
 	var want, got int64
+	var err error
 
 	alreadyWant := int64(12345)
 

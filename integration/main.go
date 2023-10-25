@@ -24,6 +24,9 @@ type InitArgs struct {
 
 	DirName    string
 	ListenAddr string
+
+	MaxChunkSize uint64
+	DisableAck   bool
 }
 
 type OnDiskCreator struct {
@@ -31,6 +34,7 @@ type OnDiskCreator struct {
 	dirName      string
 	instanceName string
 	replStorage  *replication.Storage
+	maxChunkSize uint64
 
 	m        sync.Mutex
 	storages map[string]*server.OnDisk
@@ -70,25 +74,35 @@ func InitAndServe(a InitArgs) error {
 		instanceName: a.InstanceName,
 		replStorage:  replStorage,
 		storages:     make(map[string]*server.OnDisk),
+		maxChunkSize: a.MaxChunkSize,
 	}
 
 	s := web.NewServer(logger, replState, a.InstanceName, a.DirName, a.ListenAddr, replStorage, creator.Get)
 
 	replClient := replication.NewCompClient(logger, replState, creator, a.InstanceName)
-	go replClient.Loop(context.Background())
+	go replClient.Loop(context.Background(), a.DisableAck)
 
 	logger.Printf("Listening connections at %q", a.ListenAddr)
 	return s.Serve()
 }
 
-func (c *OnDiskCreator) Stat(category string, fileName string) (size int64, exists bool, err error) {
-	st, err := os.Stat(filepath.Join(c.dirName, category, fileName))
+func (c *OnDiskCreator) Stat(category string, fileName string) (size int64, exists bool, delete bool, err error) {
+	filePath := filepath.Join(c.dirName, category, fileName)
+
+	st, err := os.Stat(filePath)
 	if errors.Is(err, os.ErrNotExist) {
-		return 0, false, nil
+		_, deletedErr := os.Stat(filePath + server.DeletedSuffix)
+		if errors.Is(deletedErr, os.ErrNotExist) {
+			return 0, false, false, nil
+		} else if deletedErr != nil {
+			return 0, false, false, deletedErr
+		}
+
+		return 0, false, true, nil
 	} else if err != nil {
-		return 0, false, err
+		return 0, false, false, err
 	}
-	return st.Size(), true, nil
+	return st.Size(), true, false, nil
 }
 
 func (c *OnDiskCreator) WriteDirect(category string, fileName string, contents []byte) error {
@@ -131,5 +145,5 @@ func (c *OnDiskCreator) newOnDisk(logger *log.Logger, category string) (*server.
 	if err := os.MkdirAll(dir, 0777); err != nil {
 		return nil, fmt.Errorf("为category创建目录: %v", err)
 	}
-	return server.NewOnDisk(logger, dir, category, c.instanceName, c.replStorage)
+	return server.NewOnDisk(logger, dir, category, c.instanceName, c.maxChunkSize, c.replStorage)
 }
