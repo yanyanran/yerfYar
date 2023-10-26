@@ -59,7 +59,7 @@ func NewState(logger *log.Logger, addr []string, clusterName string) (*State, er
 	return &State{
 		logger: logger,
 		cl:     etcdClient,
-		prefix: "yerkYar/" + clusterName + "/",
+		prefix: "yerfYar/" + clusterName + "/",
 	}, nil
 }
 
@@ -162,10 +162,10 @@ func (c *State) WatchAckQueue(ctx context.Context, instanceName string) chan Chu
 
 func (c *State) watchQueue(ctx context.Context, queueName string, instanceName string) chan Chunk {
 	prefix := c.prefix + queueName + "/" + instanceName + "/"
-	resCh := make(chan Chunk)
+	resChan := make(chan Chunk)
 
 	go func() {
-		resp, err := c.cl.Get(ctx, prefix, clientv3.WithPrefix())
+		resp, err := c.cl.Get(ctx, prefix, clientv3.WithPrefix()) // read etcd
 		// TODO: 更好地处理错误
 		if err != nil {
 			c.logger.Printf("etcd 列表key失败（某些chunk将无法下载）: %v", err)
@@ -174,13 +174,13 @@ func (c *State) watchQueue(ctx context.Context, queueName string, instanceName s
 
 		for _, kv := range resp.Kvs {
 			// 解析成chunk结构放入chan中
-			ch, err := c.parseReplicationKey(prefix, (*mvccpb.KeyValue)(kv))
+			chunk, err := c.parseReplicationKey(prefix, (*mvccpb.KeyValue)(kv))
 			if err != nil {
 				c.logger.Printf("parseReplicationKey错误： %v", err)
 				continue
 			}
 
-			resCh <- ch
+			resChan <- chunk
 		}
 	}()
 
@@ -198,16 +198,16 @@ func (c *State) watchQueue(ctx context.Context, queueName string, instanceName s
 					continue
 				}
 				// 解析成chunk结构放入chan中
-				ch, err := c.parseReplicationKey(prefix, (*mvccpb.KeyValue)(ev.Kv))
+				chunk, err := c.parseReplicationKey(prefix, ev.Kv)
 				if err != nil {
 					log.Printf("parseReplicationKey错误: %v", err)
 					continue
 				}
 
-				resCh <- ch
+				resChan <- chunk
 			}
 		}
 	}()
 
-	return resCh
+	return resChan
 }

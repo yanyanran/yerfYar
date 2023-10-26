@@ -58,6 +58,10 @@ func (s *Simple) SetDebug(v bool) {
 	s.cl.SetDebug(v)
 }
 
+func (s *Simple) SetMinSyncReplicas(v uint) {
+	s.cl.SetMinSyncReplicas(v)
+}
+
 // MarshalState go-> json
 func (s *Simple) MarshalState() ([]byte, error) {
 	return json.Marshal(s.st)

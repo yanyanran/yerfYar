@@ -131,8 +131,8 @@ func (c *Client) ensureChunkIsNotBeingDownloaded(ch Chunk) {
 }
 
 func (c *Client) replicationLoop(ctx context.Context) {
-	for ch := range c.state.WatchReplicationQueue(ctx, c.instanceName) {
-		downloader, exist := c.perCategory[ch.Category]
+	for chunk := range c.state.WatchReplicationQueue(ctx, c.instanceName) {
+		downloader, exist := c.perCategory[chunk.Category]
 		if !exist {
 			downloader = &CategoryDownloader{
 				logger:       c.logger,
@@ -146,10 +146,10 @@ func (c *Client) replicationLoop(ctx context.Context) {
 			go downloader.Loop(ctx)
 
 			c.mu.Lock()
-			c.perCategory[ch.Category] = downloader
+			c.perCategory[chunk.Category] = downloader
 			c.mu.Unlock()
 		}
-		downloader.eventsCh <- ch
+		downloader.eventsCh <- chunk
 	}
 }
 
@@ -292,7 +292,7 @@ func (c *CategoryDownloader) downloadChunk(parentCtx context.Context, ch Chunk) 
 }
 
 func (c *CategoryDownloader) downloadChunkIteration(ctx context.Context, ch Chunk) error {
-	size, exists, _, err := c.wr.Stat(ch.Category, ch.FileName)
+	chunkReadOffset, exists, _, err := c.wr.Stat(ch.Category, ch.FileName)
 	if err != nil {
 		return fmt.Errorf("获取文件信息state时出现错误: %v", err)
 	}
@@ -310,14 +310,14 @@ func (c *CategoryDownloader) downloadChunkIteration(ctx context.Context, ch Chun
 		return err
 	}
 
-	if exists && uint64(size) >= info.Size {
+	if exists && uint64(chunkReadOffset) >= info.Size {
 		if !info.Complete {
 			return errIncomplete
 		}
 		return nil
 	}
 
-	buf, err := c.downloadPart(ctx, addr, ch, size)
+	buf, err := c.downloadPart(ctx, addr, ch, chunkReadOffset)
 	if err != nil {
 		return fmt.Errorf("下载chunk出现错误: %w", err)
 	}
@@ -326,9 +326,13 @@ func (c *CategoryDownloader) downloadChunkIteration(ctx context.Context, ch Chun
 		return fmt.Errorf("写chunk时出现错误: %v", err)
 	}
 
-	size, _, _, err = c.wr.Stat(ch.Category, ch.FileName)
+	size, _, _, err := c.wr.Stat(ch.Category, ch.FileName)
 	if err != nil {
 		return fmt.Errorf("获取文件stat: %v", err)
+	}
+
+	if err := c.ackDownload(ctx, addr, ch, uint64(size)); err != nil {
+		return fmt.Errorf("复制ack出现错误: %v", err)
 	}
 
 	if uint64(size) < info.Size || !info.Complete {
@@ -414,4 +418,35 @@ func (c *CategoryDownloader) downloadPart(ctx context.Context, addr string, ch C
 	}
 
 	return b.Bytes(), nil
+}
+
+func (c *CategoryDownloader) ackDownload(ctx context.Context, addr string, ch Chunk, size uint64) error {
+	u := url.Values{}
+	u.Add("size", strconv.FormatUint(size, 10))
+	u.Add("chunk", ch.FileName)
+	u.Add("category", ch.Category)
+	u.Add("instance", c.instanceName)
+
+	ackURL := fmt.Sprintf("%s/replication/ack?%s", addr, u.Encode())
+
+	req, err := http.NewRequestWithContext(ctx, "GET", ackURL, nil)
+	if err != nil {
+		return fmt.Errorf("创建 HTTP 请求发生错误: %w", err)
+	}
+
+	resp, err := c.httpCl.Do(req)
+	if err != nil {
+		return fmt.Errorf("复制ack %q发生错误: %v", ackURL, err)
+	}
+
+	defer resp.Body.Close()
+
+	var b bytes.Buffer
+	_, err = io.Copy(&b, resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP 状态代码 %d，错误消息：%s", resp.StatusCode, b.Bytes())
+	}
+
+	return err
 }

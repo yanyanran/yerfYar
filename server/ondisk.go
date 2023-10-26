@@ -24,6 +24,11 @@ type StorageHooks interface {
 	AfterAcknowledgeChunk(ctx context.Context, category string, fileName string) error
 }
 
+type downloadNotice struct {
+	chunk string
+	size  uint64
+}
+
 type OnDisk struct {
 	logger *log.Logger
 
@@ -33,6 +38,9 @@ type OnDisk struct {
 	maxChunkSize uint64
 
 	repl StorageHooks
+
+	downloadNoticeMu sync.Mutex
+	downloadNotices  map[string]*downloadNotice
 
 	writeMu                     sync.Mutex
 	lastChunkFp                 *os.File
@@ -47,13 +55,14 @@ type OnDisk struct {
 
 func NewOnDisk(logger *log.Logger, dirname, category, instanceName string, maxChunkSize uint64, rotateChunkInterval time.Duration, repl StorageHooks) (*OnDisk, error) {
 	s := &OnDisk{
-		logger:       logger,
-		dirname:      dirname,
-		category:     category,
-		instanceName: instanceName,
-		repl:         repl,
-		maxChunkSize: maxChunkSize,
-		fps:          make(map[string]*os.File),
+		logger:          logger,
+		dirname:         dirname,
+		category:        category,
+		instanceName:    instanceName,
+		repl:            repl,
+		maxChunkSize:    maxChunkSize,
+		fps:             make(map[string]*os.File),
+		downloadNotices: make(map[string]*downloadNotice),
 	}
 
 	if err := s.initLastChunkIdx(dirname); err != nil {
@@ -164,7 +173,7 @@ func (s *OnDisk) getLastChunkFp() (*os.File, error) {
 }
 
 // Write 接受来自客户端的消息并存储
-func (s *OnDisk) Write(ctx context.Context, msgs []byte) error {
+func (s *OnDisk) Write(ctx context.Context, msgs []byte) (chunkName string, offset int64, err error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -172,19 +181,19 @@ func (s *OnDisk) Write(ctx context.Context, msgs []byte) error {
 
 	if s.lastChunk == "" || (s.lastChunkSize > 0 && willExceedMaxChunkSize) {
 		if err := s.createNextChunk(ctx); err != nil {
-			return fmt.Errorf("创建下一个chunk失败 %v", err)
+			return "", 0, fmt.Errorf("创建下一个chunk失败 %v", err)
 		}
 	}
 
 	if !s.lastChunkAddedToReplication {
 		if err := s.repl.AfterCreatingChunk(ctx, s.category, s.lastChunk); err != nil {
-			return fmt.Errorf("创建新chunk后发生错误: %w", err)
+			return "", 0, fmt.Errorf("创建新chunk后发生错误: %w", err)
 		}
 	}
 
 	fp, err := s.getLastChunkFp()
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 
 	n, err := fp.Write(msgs)
@@ -193,11 +202,37 @@ func (s *OnDisk) Write(ctx context.Context, msgs []byte) error {
 		if truncateErr := fp.Truncate(int64(s.lastChunkSize)); truncateErr != nil {
 			s.logger.Printf("无法截断 %s: %v", fp.Name(), err)
 		}
-		return err
+		return "", 0, err
 	}
 
 	s.lastChunkSize += uint64(n)
-	return err
+	return s.lastChunk, int64(s.lastChunkSize), nil
+}
+
+// Wait 等待直到minSyncReplicas报告成功下载了相应的chunk
+func (s *OnDisk) Wait(ctx context.Context, chunkName string, offset uint64, minSyncReplicas uint) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		var replicatedCount uint
+
+		s.downloadNoticeMu.Lock()
+		for _, n := range s.downloadNotices {
+			if (n.chunk > chunkName) || (n.chunk == chunkName && n.size >= offset) {
+				replicatedCount++
+			}
+		}
+		s.downloadNoticeMu.Unlock()
+
+		if replicatedCount >= minSyncReplicas { // download成功/等待ack对象版本比接收ack对象的版本高-> 不用再等
+			return nil
+		}
+
+		time.Sleep(time.Millisecond * 100)
+	}
 }
 
 // Read 读文件指定offset到byte切片中，然后写到对应writer中去
@@ -312,6 +347,18 @@ func (s *OnDisk) doAckChunk(chunk string) error {
 func (s *OnDisk) AckDirect(chunk string) error {
 	if err := s.doAckChunk(chunk); err != nil && !errors.Is(err, os.ErrNotExist) { // ack文件不存在时不警告
 		return fmt.Errorf("removing %q: %v", chunk, err)
+	}
+	return nil
+}
+
+// ReplicationAck 让正在等待min_sync_replicas的写入程序知道其写入成功
+func (s *OnDisk) ReplicationAck(ctx context.Context, chunk, instance string, size uint64) error {
+	s.downloadNoticeMu.Lock()
+	defer s.downloadNoticeMu.Unlock()
+
+	s.downloadNotices[instance] = &downloadNotice{
+		chunk: chunk,
+		size:  size,
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type Server struct {
@@ -48,6 +50,8 @@ func (s *Server) handler(ctx *fasthttp.RequestCtx) {
 		s.readHandler(ctx)
 	case "/ack":
 		s.ackHandler(ctx)
+	case "/replication/ack":
+		s.replicationAckHandler(ctx)
 	case "/listChunks":
 		s.listChunksHandler(ctx)
 	default:
@@ -87,9 +91,26 @@ func (s *Server) writeHandler(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	if err := storage.Write(ctx, ctx.Request.Body()); err != nil {
+	chunkName, off, err := storage.Write(ctx, ctx.Request.Body())
+	if err != nil {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
+		return
+	}
+	minSyncReplicas, err := ctx.QueryArgs().GetUint("min_sync_replicas")
+	if err != nil && err != fasthttp.ErrNoArgValue {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString(err.Error())
+		return
+	} else if minSyncReplicas > 0 {
+		waitCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+
+		if err := storage.Wait(waitCtx, chunkName, uint64(off), uint(minSyncReplicas)); err != nil {
+			ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+			ctx.WriteString(err.Error())
+			return
+		}
 	}
 }
 
@@ -118,6 +139,40 @@ func (s *Server) ackHandler(ctx *fasthttp.RequestCtx) {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
 	}
+}
+
+// replicationAckHandler 用于让chunk所有者（我们）知道复制副本已成功下载chunk
+func (s *Server) replicationAckHandler(ctx *fasthttp.RequestCtx) {
+	storage, err := s.getStorageForCategory(string(ctx.QueryArgs().Peek("category")))
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString(err.Error())
+		return
+	}
+
+	chunk := ctx.QueryArgs().Peek("chunk")
+	if len(chunk) == 0 {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString("错误的 `chunk` GET参数：必须提供chunk名称")
+		return
+	}
+
+	// instance是已成功下载相应chunk部分的实例名称
+	instance := ctx.QueryArgs().Peek("instance")
+	if len(chunk) == 0 {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString("错误的 `instance` GET参数：必须提供副本名称")
+		return
+	}
+
+	size, err := ctx.QueryArgs().GetUint("size")
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString(fmt.Sprintf("bad `fromOff` GET param: %v", err))
+		return
+	}
+
+	storage.ReplicationAck(ctx, string(chunk), string(instance), uint64(size))
 }
 
 func (s *Server) readHandler(ctx *fasthttp.RequestCtx) {

@@ -19,6 +19,8 @@ import (
 const simpleStateFilePath = "/tmp/yerfYar-simple-example-state-%s.json"
 
 var categoryName = flag.String("category", "stdin", "正在测试的类别")
+var debug = flag.Bool("debug", false, "Debug模式")
+var minSyncReplicas = flag.Uint("min-sync-replicas", 0, "写入msg时要等待的副本数")
 
 type readResult struct {
 	ln  string
@@ -28,7 +30,6 @@ type readResult struct {
 func main() {
 	flag.Parse()
 	ctx := context.Background()
-	debug := false
 	addrs := []string{"http://127.0.0.1:8080"}
 
 	cl := client.NewSimple(addrs)
@@ -38,12 +39,13 @@ func main() {
 			log.Printf("无法恢复保存的客户端状态: %v", err)
 		}
 	}
-	cl.SetDebug(debug)
+	cl.SetDebug(*debug)
+	cl.SetMinSyncReplicas(*minSyncReplicas)
 	fmt.Printf("在提示中输入消息以将其发送到yerkYar副本之一\n")
-	go printContinuously(ctx, cl, debug)
+	go printContinuously(ctx, cl, *debug)
 
 	rd := bufio.NewReader(os.Stdin)
-	fmt.Printf("> ")
+	fmt.Printf("(send successful)> ")
 
 	sigCh := make(chan os.Signal, 5)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
@@ -106,17 +108,13 @@ func printContinuously(ctx context.Context, cl *client.Simple, debug bool) {
 		err := cl.Process(ctx, *categoryName, scratch, func(b []byte) error {
 			fmt.Printf("\n")
 			log.Printf("BATCH: %s", b)
-			fmt.Printf("> ")
+			fmt.Printf("(invitation from Process)> ")
 			return nil
 		})
-		if err != nil {
-			fmt.Println(err)
-		}
 
-		if debug {
-			time.Sleep(time.Millisecond * 10000)
-		} else {
-			time.Sleep(time.Millisecond * 100)
+		if err != nil {
+			log.Printf("处理批处理时出错: %v", err)
+			time.Sleep(time.Second)
 		}
 	}
 }

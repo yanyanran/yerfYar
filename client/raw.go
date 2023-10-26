@@ -17,8 +17,9 @@ import (
 
 // Raw yerfYar的HTTP客户端，允许用户使用它的API向yerfYar服务器发送请求
 type Raw struct {
-	debug  bool
-	Logger *log.Logger
+	debug           bool
+	Logger          *log.Logger
+	minSyncReplicas uint
 
 	cl *http.Client
 }
@@ -38,6 +39,10 @@ func (r *Raw) SetDebug(v bool) {
 	r.debug = v
 }
 
+func (r *Raw) SetMinSyncReplicas(v uint) {
+	r.minSyncReplicas = v
+}
+
 func (r *Raw) logger() *log.Logger {
 	if r.Logger == nil {
 		return log.Default()
@@ -50,6 +55,10 @@ func (r *Raw) logger() *log.Logger {
 func (r *Raw) Write(ctx context.Context, addr string, category string, msgs []byte) (err error) {
 	u := url.Values{}
 	u.Add("category", category)
+
+	if r.minSyncReplicas > 0 {
+		u.Add("min_sync_replicas", strconv.FormatUint(uint64(r.minSyncReplicas), 10))
+	}
 
 	url := addr + "/write?" + u.Encode()
 
