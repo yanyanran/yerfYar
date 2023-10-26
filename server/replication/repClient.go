@@ -34,7 +34,7 @@ type Client struct {
 	wr           DirectWriter
 	instanceName string
 	httpCl       *http.Client
-	s            *client.Simple
+	r            *client.Raw
 
 	mu          sync.Mutex
 	perCategory map[string]*CategoryDownloader // 支持多category
@@ -48,7 +48,7 @@ type CategoryDownloader struct {
 	wr           DirectWriter
 	instanceName string
 	httpCl       *http.Client
-	s            *client.Simple
+	r            *client.Raw
 
 	// 正在下载的当前chunk的信息
 	curMu          sync.Mutex
@@ -66,16 +66,18 @@ type DirectWriter interface {
 
 // NewCompClient 初始化复制客户端
 func NewCompClient(logger *log.Logger, st *State, wr DirectWriter, instanceName string) *Client {
+	httpCl := &http.Client{
+		Timeout: defaultClientTimeout,
+	}
+
 	return &Client{
 		logger:       logger,
 		state:        st,
 		wr:           wr,
 		instanceName: instanceName,
-		httpCl: &http.Client{
-			Timeout: defaultClientTimeout,
-		},
-		s:           client.NewSimple(nil),
-		perCategory: make(map[string]*CategoryDownloader),
+		httpCl:       httpCl,
+		r:            client.NewRaw(httpCl),
+		perCategory:  make(map[string]*CategoryDownloader),
 	}
 }
 
@@ -136,7 +138,7 @@ func (c *Client) replicationLoop(ctx context.Context) {
 				wr:           c.wr,
 				instanceName: c.instanceName,
 				httpCl:       c.httpCl,
-				s:            c.s,
+				r:            c.r,
 			}
 			go downloader.Loop(ctx)
 
@@ -192,7 +194,7 @@ func (c *CategoryDownloader) downloadAllChunksUpToIteration(ctx context.Context,
 		return fmt.Errorf("获取监听端口 listenAddrForChunk 时失败: %v", err)
 	}
 
-	chunks, err := c.s.ListChunks(ctx, toReplicate.Category, addr, true)
+	chunks, err := c.r.ListChunks(ctx, addr, toReplicate.Category, true)
 	if err != nil {
 		return fmt.Errorf("列出 %q 中的chunk时失败: %v", addr, err)
 	}
@@ -355,7 +357,7 @@ func (c *CategoryDownloader) listenAddrForChunk(ctx context.Context, ch Chunk) (
 }
 
 func (c *CategoryDownloader) getChunkInfo(ctx context.Context, addr string, curCh Chunk) (protocol.Chunk, error) {
-	chunks, err := c.s.ListChunks(ctx, curCh.Category, addr, true)
+	chunks, err := c.r.ListChunks(ctx, addr, curCh.Category, true)
 	if err != nil {
 		return protocol.Chunk{}, err
 	}

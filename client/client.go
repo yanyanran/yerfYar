@@ -1,20 +1,16 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/yanyanran/yerfYar/protocol"
 	"io"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
-	"net/url"
 	"sort"
-	"strconv"
 )
 
 const defaultScratchSize = 64 * 1024
@@ -36,14 +32,14 @@ type Simple struct {
 	Logger *log.Logger
 
 	addrs []string
-	cl    *http.Client
+	cl    *Raw
 	st    *state
 }
 
 func NewSimple(addrs []string) *Simple {
 	return &Simple{
 		addrs: addrs,
-		cl:    &http.Client{},
+		cl:    NewRaw(&http.Client{}),
 		st:    &state{Offsets: make(map[string]*ReadOffset)},
 	}
 }
@@ -71,39 +67,7 @@ func (s *Simple) logger() *log.Logger {
 }
 
 func (s *Simple) Send(ctx context.Context, category string, msgs []byte) error {
-	u := url.Values{}
-	u.Add("category", category)
-
-	url := s.getAddr() + "/write?" + u.Encode()
-
-	if s.Debug {
-		debugMsgs := msgs
-		if len(debugMsgs) > 128 {
-			debugMsgs = []byte(fmt.Sprintf("%s...（总共 %d 字节）", msgs[0:128], len(msgs)))
-		}
-		s.logger().Printf("向 %s 发送以下消息: %q", url, msgs)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(msgs))
-	if err != nil {
-		return fmt.Errorf("发起HTTP请求发生错误: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-
-	res, err := s.cl.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusOK {
-		var b bytes.Buffer
-		io.Copy(&b, res.Body)
-		return fmt.Errorf("http 状态码 %d, %s", res.StatusCode, b.String())
-	}
-
-	io.Copy(io.Discard, res.Body)
-	return nil
+	return s.cl.Write(ctx, s.getAddr(), category, msgs)
 }
 
 // Process 等待新消息或出现问题时返回错误。
@@ -151,43 +115,17 @@ func (s *Simple) processInstance(ctx context.Context, addr, instance, category s
 func (s *Simple) process(ctx context.Context, addr, instance, category string, scratch []byte, processFn func([]byte) error) error {
 	curCh := s.st.Offsets[instance]
 
-	u := url.Values{}
-	u.Add("off", strconv.Itoa(int(curCh.Offset)))
-	u.Add("maxSize", strconv.Itoa(len(scratch)))
-	u.Add("chunk", curCh.CurChunk.Name)
-	u.Add("category", category)
-
-	readURL := fmt.Sprintf("%s/read?%s", addr, u.Encode())
-
-	if s.Debug {
-		s.logger().Printf("从 %s 读取", readURL)
-	}
-
-	res, err := s.cl.Get(readURL)
+	res, found, err := s.cl.Read(ctx, addr, category, curCh.CurChunk.Name, curCh.Offset, scratch)
 	if err != nil {
-		return fmt.Errorf("read %q: %v", readURL, err)
-	}
-	defer res.Body.Close()
-
-	// 如果chunk不存在但通过ListChunks()获得了它，则意味着该chunk尚未复制到该服务器
-	if res.StatusCode == http.StatusNotFound {
-		// TODO: 更好地处理丢失的chunk
-		io.Copy(ioutil.Discard, res.Body)
-		s.logger().Printf("chunk %+v 在 %q 处丢失，可能没复制，跳过", curCh.CurChunk, addr)
+		return err
+	} else if !found {
+		if s.Debug {
+			s.logger().Printf("chunk %+v 在 %q 处丢失，可能没复制，跳过", curCh.CurChunk.Name, addr)
+		}
 		return nil
-	} else if res.StatusCode != http.StatusOK {
-		var b bytes.Buffer
-		io.Copy(&b, res.Body)
-		return fmt.Errorf("GET %q: http code %d, %s", readURL, res.StatusCode, b.String())
 	}
-	b := bytes.NewBuffer(scratch[0:0])
-	_, err = io.Copy(b, res.Body)
-	if err != nil {
-		return fmt.Errorf("writing response: %v", err)
-	}
-
 	// 读0个字节但没错，意味着按照约定文件结束
-	if b.Len() == 0 {
+	if len(res) == 0 {
 		if !curCh.CurChunk.Complete {
 			if err := s.updateCurrentChunkCompleteStatus(ctx, curCh, instance, category, addr); err != nil {
 				return fmt.Errorf("updateCurrentChunkCompleteStatus: %v", err)
@@ -213,7 +151,7 @@ func (s *Simple) process(ctx context.Context, addr, instance, category string, s
 		}
 
 		// 每读取完一个chunk就会ack一次
-		if err := s.ackCurrentChunk(instance, category, addr); err != nil {
+		if err := s.cl.Ack(ctx, addr, category, curCh.CurChunk.Name, curCh.Offset); err != nil {
 			return fmt.Errorf("ack current chunk: %v", err)
 		}
 		// 需要读取下一个chunk，这样我们就不会返回空响应
@@ -230,9 +168,9 @@ func (s *Simple) process(ctx context.Context, addr, instance, category string, s
 		return errRetry
 	}
 
-	err = processFn(b.Bytes())
+	err = processFn(res)
 	if err == nil {
-		curCh.Offset += uint64(b.Len())
+		curCh.Offset += uint64(len(res))
 		s.st.Offsets[instance] = curCh
 	}
 
@@ -240,7 +178,7 @@ func (s *Simple) process(ctx context.Context, addr, instance, category string, s
 }
 
 func (s *Simple) updateCurrentChunks(ctx context.Context, category, addr string) error {
-	chunks, err := s.ListChunks(ctx, category, addr, false)
+	chunks, err := s.cl.ListChunks(ctx, addr, category, false)
 	if err != nil {
 		return fmt.Errorf("listChunks failed: %v", err)
 	}
@@ -299,7 +237,7 @@ func (s *Simple) getOldestChunk(chunks []protocol.Chunk) protocol.Chunk {
 }
 
 func (s *Simple) updateCurrentChunkCompleteStatus(ctx context.Context, curCh *ReadOffset, instance, category, addr string) error {
-	chunks, err := s.ListChunks(ctx, category, addr, false)
+	chunks, err := s.cl.ListChunks(ctx, addr, category, false)
 	if err != nil {
 		return fmt.Errorf("listChunks failed: %v", err)
 	}
@@ -317,72 +255,5 @@ func (s *Simple) updateCurrentChunkCompleteStatus(ctx context.Context, curCh *Re
 			return nil
 		}
 	}
-	return nil
-}
-
-// ListChunks 返回相应yerkYar实例的chunk列表
-// TODO: 将其提取到一个单独的client中
-func (s *Simple) ListChunks(ctx context.Context, category, addr string, fromReplication bool) ([]protocol.Chunk, error) {
-	u := url.Values{}
-	u.Add("category", category)
-	if fromReplication {
-		u.Add("from_replication", "1")
-	}
-
-	listURL := fmt.Sprintf("%s/listChunks?%s", addr, u.Encode())
-
-	req, err := http.NewRequestWithContext(ctx, "GET", listURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating new http request: %w", err)
-	}
-
-	resp, err := s.cl.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(resp.Body) // 读取响应体的内容并返回错误
-		if err != nil {
-			return nil, err
-		}
-		return nil, fmt.Errorf("listChunks error: %s", body)
-	}
-
-	var res []protocol.Chunk
-	// 创建JSON解码器并将响应体的内容解码为res
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return nil, err
-	}
-
-	if s.Debug {
-		s.logger().Printf("ListChunks(%q) returned %+v", addr, res)
-	}
-
-	return res, nil
-}
-
-func (s *Simple) ackCurrentChunk(instance, category, addr string) error {
-	curCh := s.st.Offsets[instance]
-
-	u := url.Values{}
-	u.Add("chunk", curCh.CurChunk.Name)
-	u.Add("size", strconv.Itoa(int(curCh.Offset)))
-	u.Add("category", category)
-
-	res, err := s.cl.Get(fmt.Sprintf(addr+"/ack?%s", u.Encode()))
-	if err != nil {
-		return err
-	}
-
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusOK {
-		var b bytes.Buffer
-		io.Copy(&b, res.Body)
-		return fmt.Errorf("http code %d, %s", res.StatusCode, b.String())
-	}
-	io.Copy(io.Discard, res.Body) // 数据丢弃
 	return nil
 }
