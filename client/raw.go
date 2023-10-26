@@ -47,7 +47,7 @@ func (r *Raw) logger() *log.Logger {
 }
 
 // Write 将事件发送到相应的yerfYar服务器
-func (r *Raw) Write(ctx context.Context, addr string, category string, msgs []byte) error {
+func (r *Raw) Write(ctx context.Context, addr string, category string, msgs []byte) (err error) {
 	u := url.Values{}
 	u.Add("category", category)
 
@@ -59,6 +59,7 @@ func (r *Raw) Write(ctx context.Context, addr string, category string, msgs []by
 			debugMsgs = []byte(fmt.Sprintf("%s...（总共 %d 字节）", msgs[0:128], len(msgs)))
 		}
 		r.logger().Printf("向 %s 发送以下消息: %q", url, debugMsgs)
+		defer func() { r.logger().Printf("发送结果: err=%v", err) }()
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(msgs))
@@ -95,6 +96,7 @@ func (r *Raw) Read(ctx context.Context, addr string, category string, chunk stri
 
 	if r.debug {
 		r.logger().Printf("从 %s 读取", readURL)
+		defer func() { r.logger().Printf("读返回: res=%d bytes, found=%v, err=%v", len(res), found, err) }()
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", readURL, nil)
@@ -174,6 +176,10 @@ func (r *Raw) Ack(ctx context.Context, addr, category, chunk string, size uint64
 	u.Add("chunk", chunk)
 	u.Add("size", strconv.FormatInt(int64(size), 10))
 	u.Add("category", category)
+
+	if r.debug {
+		r.logger().Printf("【ack】 类别: %q chunk: %q 大小: %d 位于：%q", category, chunk, size, addr)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf(addr+"/ack?%s", u.Encode()), nil)
 	if err != nil {
