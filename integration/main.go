@@ -25,16 +25,18 @@ type InitArgs struct {
 	DirName    string
 	ListenAddr string
 
-	MaxChunkSize uint64
-	DisableAck   bool
+	MaxChunkSize        uint64
+	RotateChunkInterval time.Duration
+	DisableAck          bool
 }
 
 type OnDiskCreator struct {
-	logger       *log.Logger
-	dirName      string
-	instanceName string
-	replStorage  *replication.Storage
-	maxChunkSize uint64
+	logger              *log.Logger
+	dirName             string
+	instanceName        string
+	replStorage         *replication.Storage
+	maxChunkSize        uint64
+	rotateChunkInterval time.Duration
 
 	m        sync.Mutex
 	storages map[string]*server.OnDisk
@@ -42,7 +44,7 @@ type OnDiskCreator struct {
 
 // InitAndServe 检查所提供参数的有效性并在指定端口上启动 Web 服务器 (instanceName-"xx-chunk"->"xx"
 func InitAndServe(a InitArgs) error {
-	logger := log.New(a.LogWriter, "["+a.InstanceName+"] ", log.LstdFlags)
+	logger := log.New(a.LogWriter, "["+a.InstanceName+"] ", log.LstdFlags|log.Lmicroseconds)
 
 	replState, err := replication.NewState(logger, a.EtcdAddr, a.ClusterName)
 	if err != nil {
@@ -69,12 +71,13 @@ func InitAndServe(a InitArgs) error {
 
 	replStorage := replication.NewStorage(logger, replState, a.InstanceName)
 	creator := &OnDiskCreator{
-		logger:       logger,
-		dirName:      a.DirName,
-		instanceName: a.InstanceName,
-		replStorage:  replStorage,
-		storages:     make(map[string]*server.OnDisk),
-		maxChunkSize: a.MaxChunkSize,
+		logger:              logger,
+		dirName:             a.DirName,
+		instanceName:        a.InstanceName,
+		replStorage:         replStorage,
+		storages:            make(map[string]*server.OnDisk),
+		maxChunkSize:        a.MaxChunkSize,
+		rotateChunkInterval: a.RotateChunkInterval,
 	}
 
 	s := web.NewServer(logger, replState, a.InstanceName, a.DirName, a.ListenAddr, replStorage, creator.Get)
@@ -145,5 +148,5 @@ func (c *OnDiskCreator) newOnDisk(logger *log.Logger, category string) (*server.
 	if err := os.MkdirAll(dir, 0777); err != nil {
 		return nil, fmt.Errorf("为category创建目录: %v", err)
 	}
-	return server.NewOnDisk(logger, dir, category, c.instanceName, c.maxChunkSize, c.replStorage)
+	return server.NewOnDisk(logger, dir, category, c.instanceName, c.maxChunkSize, c.rotateChunkInterval, c.replStorage)
 }

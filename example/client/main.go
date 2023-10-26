@@ -28,6 +28,7 @@ type readResult struct {
 func main() {
 	flag.Parse()
 	ctx := context.Background()
+	debug := false
 	addrs := []string{"http://127.0.0.1:8080"}
 
 	cl := client.NewSimple(addrs)
@@ -37,11 +38,9 @@ func main() {
 			log.Printf("无法恢复保存的客户端状态: %v", err)
 		}
 	}
-	cl.Debug = true
-
+	cl.SetDebug(debug)
 	fmt.Printf("在提示中输入消息以将其发送到yerkYar副本之一\n")
-
-	go printContinuously(ctx, cl)
+	go printContinuously(ctx, cl, debug)
 
 	rd := bufio.NewReader(os.Stdin)
 	fmt.Printf("> ")
@@ -100,7 +99,7 @@ func saveState(cl *client.Simple) {
 	fmt.Println("")
 }
 
-func printContinuously(ctx context.Context, cl *client.Simple) {
+func printContinuously(ctx context.Context, cl *client.Simple, debug bool) {
 	scratch := make([]byte, 1024*1024)
 
 	for {
@@ -114,7 +113,7 @@ func printContinuously(ctx context.Context, cl *client.Simple) {
 			fmt.Println(err)
 		}
 
-		if cl.Debug {
+		if debug {
 			time.Sleep(time.Millisecond * 10000)
 		} else {
 			time.Sleep(time.Millisecond * 100)

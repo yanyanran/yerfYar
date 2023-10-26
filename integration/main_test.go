@@ -96,7 +96,7 @@ type tweaks struct {
 	modifyInitArgs func(t *testing.T, a *InitArgs)
 }
 
-func runChukcha(t *testing.T, withReplica bool, w tweaks) (addrs []string, etcdAddr string) {
+func runYerfYar(t *testing.T, withReplica bool, w tweaks) (addrs []string, etcdAddr string) {
 	t.Helper()
 
 	log.SetFlags(log.Flags() | log.Lmicroseconds)
@@ -111,10 +111,16 @@ func runChukcha(t *testing.T, withReplica bool, w tweaks) (addrs []string, etcdA
 		t.Fatalf("Failed to get free port: %v", err)
 	}
 
-	dbPath, err := os.MkdirTemp(t.TempDir(), "yerkYar-moscow")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
+	dbPath := t.TempDir()
+
+	// YerfYar每100ms在后台创建一个空chunk，因此第一次尝试删除目录时可能会失败
+	t.Cleanup(func() {
+		for i := 0; i < 10; i++ {
+			if err := os.RemoveAll(dbPath); err == nil {
+				return
+			}
+		}
+	})
 
 	if w.dbInitFn != nil {
 		w.dbInitFn(t, dbPath)
@@ -135,23 +141,20 @@ func runChukcha(t *testing.T, withReplica bool, w tweaks) (addrs []string, etcdA
 		// if it is a replica
 		if port != port1 {
 			instanceName = "voronezh"
-
-			dirName, err = os.MkdirTemp(t.TempDir(), "yerkYar-"+instanceName)
-			if err != nil {
-				t.Fatalf("Failed to create temp dir: %v", err)
-			}
+			dirName = t.TempDir()
 		}
 
 		errCh := make(chan error, 1)
 		go func(port int) {
 			a := InitArgs{
-				LogWriter:    log.Default().Writer(),
-				EtcdAddr:     []string{etcdAddr},
-				InstanceName: instanceName,
-				ClusterName:  "testRussia",
-				DirName:      dirName,
-				ListenAddr:   fmt.Sprintf("localhost:%d", port),
-				MaxChunkSize: 20 * 1024 * 1024,
+				LogWriter:           log.Default().Writer(),
+				EtcdAddr:            []string{etcdAddr},
+				InstanceName:        instanceName,
+				ClusterName:         "testRussia",
+				DirName:             dirName,
+				ListenAddr:          fmt.Sprintf("localhost:%d", port),
+				MaxChunkSize:        20 * 1024 * 1024,
+				RotateChunkInterval: 50 * time.Millisecond,
 			}
 
 			if w.modifyInitArgs != nil {
@@ -175,7 +178,7 @@ func simpleClientAndServerTest(t *testing.T, concurrent, withReplica bool) {
 
 	ctx := context.Background()
 
-	addrs, _ := runChukcha(t, withReplica, tweaks{
+	addrs, _ := runYerfYar(t, withReplica, tweaks{
 		dbInitFn: func(t *testing.T, dbPath string) {
 			categoryPath := filepath.Join(dbPath, "numbers")
 			os.MkdirAll(categoryPath, 0777)

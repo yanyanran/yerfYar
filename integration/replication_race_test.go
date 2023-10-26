@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"testing"
 	"time"
@@ -82,61 +83,60 @@ func TestReplicatingAlreadyAcknowledgedChunk(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	addrs, _ := runChukcha(t, true, tweaks{
+	addrs, _ := runYerfYar(t, true, tweaks{
 		modifyInitArgs: func(t *testing.T, a *InitArgs) {
 			a.DisableAck = true
 			a.MaxChunkSize = 10
 		},
 	})
 
+	moscowAddr := addrs[0]
+	voronezhAddr := addrs[1]
+
+	// 必须足够大，可以容纳发送的所有信息
+	scratch := make([]byte, 1024)
+
 	rawClient := client.NewRaw(&http.Client{})
-	moscowClient := client.NewSimple(addrs[0:1])
-	voronezhClient := client.NewSimple(addrs[1:2])
-	// voronezhClient.Debug = true
+	rawClient.SetDebug(true)
+	moscowClient := client.NewSimple([]string{moscowAddr})
+	moscowClient.SetDebug(true)
+	moscowClient.Logger = log.Default()
+	voronezhClient := client.NewSimple([]string{voronezhAddr})
+	voronezhClient.SetDebug(true)
+	voronezhClient.Logger = log.Default()
 
 	firstMsg := "Moscow is having chunk0 which starts to replicate to Voronezh immediately\n"
 
 	// 在Moscow创建 chunk0
 	mustSend(t, moscowClient, ctx, "race", []byte(firstMsg))
-	ensureChunkExists(t, rawClient, addrs[0], moscowChunkName(0), "第一次发送后 Chunk0 必须存在")
+	ensureChunkExists(t, rawClient, moscowAddr, moscowChunkName(0), "第一次发送后 Chunk0 必须存在")
 
 	// 在Moscow创建 chunk1
 	mustSend(t, moscowClient, ctx, "race", []byte("Moscow now has chunk1 that is being written into currently\n"))
-	ensureChunkExists(t, rawClient, addrs[0], moscowChunkName(1), "Chunk1 must be present after second send")
+	ensureChunkExists(t, rawClient, moscowAddr, moscowChunkName(1), "Chunk1 must be present after second send")
 
-	waitUntilChunkAppears(t, rawClient, addrs[1], moscowChunkName(1), "Voronezh must have chunk1 via replication")
+	waitUntilChunkAppears(t, rawClient, voronezhAddr, moscowChunkName(1), "Voronezh must have chunk1 via replication")
 
 	// 阅读Moscow的 chunk0 直到最后并确认它
-	err := voronezhClient.Process(ctx, "race", nil, func(msg []byte) error {
-		if !bytes.Equal(msg, []byte(firstMsg)) {
-			t.Fatalf("读取意外消息：%q 而不是 %q", string(msg), firstMsg)
-		}
-
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("处理Voronezh第一个chunk期间预计不会出现错误: %v", err)
+	res, found, err := rawClient.Read(ctx, voronezhAddr, "race", moscowChunkName(0), 0, scratch)
+	if err != nil || !found || !bytes.Equal(res, []byte(firstMsg)) {
+		t.Fatalf("Read(chunk0) from Voronezh = %q, %v, %v; want %q, false, nil", string(res), found, err, firstMsg)
 	}
 
-	ensureChunkExists(t, rawClient, addrs[1], moscowChunkName(0), "Chunk0 must not have been acknowledged when reading from Voronezh the first time")
-
-	// TODO: 要在简单客户端中触发确认，我们需要再次读取相同的块，以便它看到该块是完整的并且可以被确认。这不应该是必需的
-	err = voronezhClient.Process(ctx, "race", nil, func(msg []byte) error {
-		return nil
-	})
+	err = rawClient.Ack(ctx, voronezhAddr, "race", moscowChunkName(0), uint64(len(res)))
 	if err != nil {
-		t.Fatalf("No errors expected during processing of the second chunk in Voronezh: %v", err)
+		t.Fatalf("Ack(chunk0) on Voronezh = %v; want no errors", err)
 	}
 
-	ensureChunkDoesNotExist(t, rawClient, addrs[1], moscowChunkName(0), "Chunk0 must have been acknowledged when reading from Voronezh")
+	ensureChunkDoesNotExist(t, rawClient, voronezhAddr, moscowChunkName(0), "Chunk0 must have been acknowledged when reading from Voronezh")
 
 	// 在Moscow创建 chunk2
 	mustSend(t, moscowClient, ctx, "race", []byte("Moscow now has chunk2 that is being written into currently, and this will also create an entry to replication which will try to download chunk0 on Voronezh once again, even though it was acknowledged on Voronezh, and, as acknowledge thread is disabled in this test, it will mean that Voronezh will download chunk0 once again\n"))
-	ensureChunkExists(t, rawClient, addrs[0], moscowChunkName(2), "Chunk2 must be present after third send()")
+	ensureChunkExists(t, rawClient, moscowAddr, moscowChunkName(2), "Chunk2 must be present after third send()")
 
 	// 确保 chunk2 已开始下载
-	waitUntilChunkAppears(t, rawClient, addrs[1], moscowChunkName(2), "Chunk2 must be present on Voronezh via replication")
+	waitUntilChunkAppears(t, rawClient, voronezhAddr, moscowChunkName(2), "Chunk2 must be present on Voronezh via replication")
 
 	// 如果一切正常，这意味着Moscow chunk0 将不会下载到Voronezh，因为它已经在那里得到了ack
-	ensureChunkDoesNotExist(t, rawClient, addrs[1], moscowChunkName(0), "Chunk0 must not be present on Voronezh because it was previously acknowledged")
+	ensureChunkDoesNotExist(t, rawClient, voronezhAddr, moscowChunkName(0), "Chunk0 must not be present on Voronezh because it was previously acknowledged")
 }

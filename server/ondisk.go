@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 var errBufTooSmall = errors.New("the buffer is too small to contain a single message")
@@ -34,6 +35,7 @@ type OnDisk struct {
 	repl StorageHooks
 
 	writeMu                     sync.Mutex
+	lastChunkFp                 *os.File
 	lastChunk                   string
 	lastChunkSize               uint64
 	lastChunkIdx                uint64
@@ -43,7 +45,7 @@ type OnDisk struct {
 	fps   map[string]*os.File // 缓存已打开的文件描述符，以便在需要读或写文件块时可快速访问
 }
 
-func NewOnDisk(logger *log.Logger, dirname, category, instanceName string, maxChunkSize uint64, repl StorageHooks) (*OnDisk, error) {
+func NewOnDisk(logger *log.Logger, dirname, category, instanceName string, maxChunkSize uint64, rotateChunkInterval time.Duration, repl StorageHooks) (*OnDisk, error) {
 	s := &OnDisk{
 		logger:       logger,
 		dirname:      dirname,
@@ -57,7 +59,7 @@ func NewOnDisk(logger *log.Logger, dirname, category, instanceName string, maxCh
 	if err := s.initLastChunkIdx(dirname); err != nil {
 		return nil, err
 	}
-
+	go s.createNextChunkThread(rotateChunkInterval)
 	return s, nil
 }
 
@@ -94,73 +96,108 @@ func (s *OnDisk) WriteDirect(chunk string, contents []byte) error {
 	return err
 }
 
+func (s *OnDisk) createNextChunkThread(interval time.Duration) {
+	for {
+		time.Sleep(interval)
+
+		if err := s.tryCreateNextEmptyChunkIfNeeded(); err != nil {
+			s.logger.Printf("在后台创建下一个空chunk失败: %v", err)
+		}
+	}
+}
+
+func (s *OnDisk) tryCreateNextEmptyChunkIfNeeded() error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if s.lastChunkSize == 0 {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	s.logger.Printf("从timer创建空chunk")
+
+	return s.createNextChunk(ctx)
+}
+
+func (s *OnDisk) createNextChunk(ctx context.Context) error {
+	if s.lastChunkFp != nil {
+		s.lastChunkFp.Close() // 关闭上一个chunk的fp（确保在创建新chunk前关闭旧chunk）
+		s.lastChunkFp = nil
+	}
+
+	newChunk := fmt.Sprintf("%s-chunk%09d", s.instanceName, s.lastChunkIdx)
+
+	fp, err := os.OpenFile(filepath.Join(s.dirname, newChunk), os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		return err
+	}
+	defer fp.Close()
+
+	s.lastChunk = newChunk
+	s.lastChunkSize = 0
+	s.lastChunkIdx++
+	s.lastChunkAddedToReplication = false
+
+	if err := s.repl.AfterCreatingChunk(ctx, s.category, s.lastChunk); err != nil {
+		return fmt.Errorf("创建新chunk后发生错误: %w", err)
+	}
+
+	s.lastChunkAddedToReplication = true
+	return nil
+}
+
+func (s *OnDisk) getLastChunkFp() (*os.File, error) {
+	if s.lastChunkFp != nil {
+		return s.lastChunkFp, nil
+	}
+
+	fp, err := os.OpenFile(filepath.Join(s.dirname, s.lastChunk), os.O_WRONLY, 0666)
+	if err != nil {
+		return nil, fmt.Errorf("用于写入的chunk发生错误: %v", err)
+	}
+	s.lastChunkFp = fp
+
+	return fp, nil
+}
+
+// Write 接受来自客户端的消息并存储
 func (s *OnDisk) Write(ctx context.Context, msgs []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	// new a chunk
-	if s.lastChunk == "" || (s.lastChunkSize+uint64(len(msgs)) > s.maxChunkSize) {
-		s.lastChunk = fmt.Sprintf("%s-chunk%09d", s.instanceName, s.lastChunkIdx)
-		s.lastChunkSize = 0
-		s.lastChunkIdx++
-		s.lastChunkAddedToReplication = false
+	willExceedMaxChunkSize := s.lastChunkSize+uint64(len(msgs)) > s.maxChunkSize
+
+	if s.lastChunk == "" || (s.lastChunkSize > 0 && willExceedMaxChunkSize) {
+		if err := s.createNextChunk(ctx); err != nil {
+			return fmt.Errorf("创建下一个chunk失败 %v", err)
+		}
 	}
 
-	fp, err := s.getFileDescriptor(s.lastChunk, true)
+	if !s.lastChunkAddedToReplication {
+		if err := s.repl.AfterCreatingChunk(ctx, s.category, s.lastChunk); err != nil {
+			return fmt.Errorf("创建新chunk后发生错误: %w", err)
+		}
+	}
+
+	fp, err := s.getLastChunkFp()
 	if err != nil {
 		return err
 	}
 
-	// 当前chunk没有添加到复制队列中
-	if !s.lastChunkAddedToReplication {
-		if err := s.repl.AfterCreatingChunk(ctx, s.category, s.lastChunk); err != nil {
-			return fmt.Errorf("after creating new chunk: %w", err)
-		}
-
-		s.lastChunkAddedToReplication = true
-	}
-
-	_, err = fp.Write(msgs)
-	s.lastChunkSize += uint64(len(msgs))
-	return err
-}
-
-// 检查给定chunk的文件描述符是否已映射
-func (s *OnDisk) getFileDescriptor(chunk string, write bool) (*os.File, error) {
-	s.fpsMu.Lock()
-	defer s.fpsMu.Unlock()
-
-	fp, ok := s.fps[chunk]
-	if ok {
-		return fp, nil
-	}
-
-	fl := os.O_RDONLY
-	if write {
-		fl = os.O_RDWR | os.O_CREATE | os.O_EXCL
-	}
-
-	filename := filepath.Join(s.dirname, chunk)
-	fp, err := os.OpenFile(filename, fl, 0666)
+	n, err := fp.Write(msgs)
 	if err != nil {
-		return nil, fmt.Errorf("create file %q: %w", filename, err)
+		// 【回退机制】写入失败后尝试截断到原本chunk的大小来恢复
+		if truncateErr := fp.Truncate(int64(s.lastChunkSize)); truncateErr != nil {
+			s.logger.Printf("无法截断 %s: %v", fp.Name(), err)
+		}
+		return err
 	}
 
-	s.fps[chunk] = fp
-	return fp, nil
-}
-
-func (s *OnDisk) forgetFileDescriptor(chunk string) {
-	s.fpsMu.Lock()
-	defer s.fpsMu.Unlock()
-
-	fp, ok := s.fps[chunk]
-	if !ok {
-		return
-	}
-
-	fp.Close()
-	delete(s.fps, chunk)
+	s.lastChunkSize += uint64(n)
+	return err
 }
 
 // Read 读文件指定offset到byte切片中，然后写到对应writer中去
@@ -171,10 +208,11 @@ func (s *OnDisk) Read(chunk string, offset uint64, maxSize uint64, w io.Writer) 
 		return fmt.Errorf("stat %q: %w", chunk, err)
 	}
 
-	fp, err := s.getFileDescriptor(chunk, false)
+	fp, err := os.Open(filepath.Join(s.dirname, chunk))
 	if err != nil {
-		return fmt.Errorf("getFileDescriptor(%q): %w", chunk, err)
+		return fmt.Errorf("open(%q)发生错误: %w", chunk, err)
 	}
+	defer fp.Close()
 
 	buf := make([]byte, maxSize)
 	n, err := fp.ReadAt(buf, int64(offset))
@@ -248,8 +286,6 @@ func (s *OnDisk) Ack(ctx context.Context, chunk string, size uint64) error {
 	if err := s.repl.AfterAcknowledgeChunk(ctx, s.category, chunk); err != nil {
 		s.logger.Printf("无法复制ack请求: %v", err)
 	}
-
-	s.forgetFileDescriptor(chunk)
 	return nil
 }
 
@@ -277,8 +313,6 @@ func (s *OnDisk) AckDirect(chunk string) error {
 	if err := s.doAckChunk(chunk); err != nil && !errors.Is(err, os.ErrNotExist) { // ack文件不存在时不警告
 		return fmt.Errorf("removing %q: %v", chunk, err)
 	}
-
-	s.forgetFileDescriptor(chunk)
 	return nil
 }
 

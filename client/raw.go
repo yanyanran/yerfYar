@@ -17,7 +17,7 @@ import (
 
 // Raw yerfYar的HTTP客户端，允许用户使用它的API向yerfYar服务器发送请求
 type Raw struct {
-	Debug  bool
+	debug  bool
 	Logger *log.Logger
 
 	cl *http.Client
@@ -31,6 +31,11 @@ func NewRaw(cl *http.Client) *Raw {
 	return &Raw{
 		cl: cl,
 	}
+}
+
+// SetDebug 启用或禁用客户端的调试日志记录
+func (r *Raw) SetDebug(v bool) {
+	r.debug = v
 }
 
 func (r *Raw) logger() *log.Logger {
@@ -48,7 +53,7 @@ func (r *Raw) Write(ctx context.Context, addr string, category string, msgs []by
 
 	url := addr + "/write?" + u.Encode()
 
-	if r.Debug {
+	if r.debug {
 		debugMsgs := msgs
 		if len(debugMsgs) > 128 {
 			debugMsgs = []byte(fmt.Sprintf("%s...（总共 %d 字节）", msgs[0:128], len(msgs)))
@@ -88,7 +93,7 @@ func (r *Raw) Read(ctx context.Context, addr string, category string, chunk stri
 
 	readURL := fmt.Sprintf("%s/read?%s", addr, u.Encode())
 
-	if r.Debug {
+	if r.debug {
 		r.logger().Printf("从 %s 读取", readURL)
 	}
 
@@ -157,7 +162,7 @@ func (r *Raw) ListChunks(ctx context.Context, addr, category string, fromReplica
 		return nil, err
 	}
 
-	if r.Debug {
+	if r.debug {
 		r.logger().Printf("ListChunks(%q) 返回 %+v", addr, res)
 	}
 

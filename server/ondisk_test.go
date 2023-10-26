@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestInitLastChunkIdx(t *testing.T) {
@@ -22,57 +23,6 @@ func TestInitLastChunkIdx(t *testing.T) {
 
 	if got != want {
 		t.Errorf("Last chunk index = %d, want %d", got, want)
-	}
-}
-
-func TestGetFileDescriptor(t *testing.T) {
-	dir := getTempDir(t)
-	testCreateFile(t, filepath.Join(dir, "moscow-chunk1"))
-	srv := testNewOnDisk(t, dir)
-
-	testCases := []struct {
-		desc     string
-		filename string
-		write    bool
-		wantErr  bool
-	}{
-		{
-			desc:     "从现有文件读取, 不应失败",
-			filename: "moscow-chunk1",
-			write:    false,
-			wantErr:  false,
-		},
-		{
-			desc:     "不应覆盖现有文件",
-			filename: "moscow-chunk1",
-			write:    true,
-			wantErr:  true,
-		},
-		{
-			desc:     "不应该从不存在的文件中读取",
-			filename: "moscow-chunk2",
-			write:    false,
-			wantErr:  true,
-		},
-		{
-			desc:     "应该能创建不存在的文件",
-			filename: "moscow-chunk2",
-			write:    true,
-			wantErr:  false,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.desc, func(t *testing.T) {
-			_, err := srv.getFileDescriptor(tc.filename, tc.write)
-			defer srv.forgetFileDescriptor(tc.filename)
-
-			if tc.wantErr && err == nil {
-				t.Errorf("wanted error, got not errors")
-			} else if !tc.wantErr && err != nil {
-				t.Errorf("wanted no errors, got error %v", err)
-			}
-		})
 	}
 }
 
@@ -176,7 +126,7 @@ func (n *nilHooks) AfterAcknowledgeChunk(ctx context.Context, category string, f
 func testNewOnDisk(t *testing.T, dir string) *OnDisk {
 	t.Helper()
 
-	srv, err := NewOnDisk(log.Default(), dir, "test", "moscow", 20*1024*1024, &nilHooks{})
+	srv, err := NewOnDisk(log.Default(), dir, "test", "moscow", 20*1024*1024, time.Minute, &nilHooks{})
 	if err != nil {
 		t.Fatalf("NewOnDisk(): %v", err)
 	}

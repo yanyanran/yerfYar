@@ -28,7 +28,7 @@ type state struct {
 }
 
 type Simple struct {
-	Debug  bool
+	debug  bool
 	Logger *log.Logger
 
 	addrs []string
@@ -42,6 +42,11 @@ func NewSimple(addrs []string) *Simple {
 		cl:    NewRaw(&http.Client{}),
 		st:    &state{Offsets: make(map[string]*ReadOffset)},
 	}
+}
+
+func (s *Simple) SetDebug(v bool) {
+	s.debug = v
+	s.cl.SetDebug(v)
 }
 
 // MarshalState go-> json
@@ -103,7 +108,7 @@ func (s *Simple) processInstance(ctx context.Context, addr, instance, category s
 
 		err := s.process(ctx, addr, instance, category, scratch, processFn)
 		if err == errRetry {
-			if s.Debug {
+			if s.debug {
 				s.logger().Printf("正在重试读取类别 %q ...(获取到错误：%v)", category, err)
 			}
 			continue
@@ -115,11 +120,15 @@ func (s *Simple) processInstance(ctx context.Context, addr, instance, category s
 func (s *Simple) process(ctx context.Context, addr, instance, category string, scratch []byte, processFn func([]byte) error) error {
 	curCh := s.st.Offsets[instance]
 
+	if curCh.CurChunk.Name == "" {
+		return io.EOF
+	}
+
 	res, found, err := s.cl.Read(ctx, addr, category, curCh.CurChunk.Name, curCh.Offset, scratch)
 	if err != nil {
 		return err
 	} else if !found {
-		if s.Debug {
+		if s.debug {
 			s.logger().Printf("chunk %+v 在 %q 处丢失，可能没复制，跳过", curCh.CurChunk.Name, addr)
 		}
 		return nil
@@ -143,7 +152,7 @@ func (s *Simple) process(ctx context.Context, addr, instance, category string, s
 
 		// 该chunk已被标记完成，但在发送读取请求和chunk Complete之间出现了新数据
 		if curCh.Offset < curCh.CurChunk.Size {
-			if s.Debug {
+			if s.debug {
 				s.logger().Printf(`errRetry：chunk %q 已标记为完成。然而在发送读取请求和chunk完成之间出现了新数据。 (curCh.Off < curCh.CurChunk.Size) = (%v < %v)`,
 					curCh.CurChunk.Name, curCh.Offset, curCh.CurChunk.Size)
 			}
@@ -162,7 +171,7 @@ func (s *Simple) process(ctx context.Context, addr, instance, category string, s
 
 		s.st.Offsets[instance] = curCh
 
-		if s.Debug {
+		if s.debug {
 			s.logger().Printf(`errRetry: 需要读取下一个chunk，这样就不会返回空响应`)
 		}
 		return errRetry
@@ -189,6 +198,10 @@ func (s *Simple) updateCurrentChunks(ctx context.Context, category, addr string)
 
 	chunksByInstance := make(map[string][]protocol.Chunk)
 	for _, c := range chunks {
+		if c.Size == 0 {
+			continue
+		}
+
 		instance, chunkIdx := protocol.ParseChunkFileName(c.Name)
 		if chunkIdx < 0 {
 			continue
