@@ -22,6 +22,7 @@ const simpleStateFilePath = "/tmp/yerfYar-simple-example-state-%s.json"
 var categoryName = flag.String("category", "stdin", "正在测试的类别")
 var debug = flag.Bool("debug", false, "Debug模式")
 var minSyncReplicas = flag.Uint("min-sync-replicas", 0, "写入msg时要等待的副本数")
+var addrsFlag = flag.String("addrs", "http://127.0.0.1:8080,http://127.0.0.1:8081,http://127.0.0.1:8082,http://127.0.0.1:8083,http://127.0.0.1:8084", "yerfYar server列表")
 
 type readResult struct {
 	ln  string
@@ -34,7 +35,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	log.SetFlags(log.Flags() | log.Lmicroseconds)
 
-	addrs := []string{"http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://127.0.0.1:8082", "http://127.0.0.1:8083", "http://127.0.0.1:8084"}
+	addrs := strings.Split(*addrsFlag, ",")
 
 	cl := client.NewSimple(addrs)
 	// 读持久化
