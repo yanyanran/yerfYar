@@ -26,6 +26,11 @@ const batchSize = 4 * 1024 * 1024 // 4 MB
 var errNotFound = errors.New("chunk not found")
 var errIncomplete = errors.New("chunk is not complete")
 
+type categoryAndReplica struct {
+	category string
+	replica  string
+}
+
 // Client 描述复制的客户端状态并不断从其他服务器下载新chunk
 type Client struct {
 	logger *log.Logger
@@ -36,8 +41,8 @@ type Client struct {
 	httpCl       *http.Client
 	r            *client.Raw
 
-	mu          sync.Mutex
-	perCategory map[string]*CategoryDownloader // 支持多category
+	mu                    sync.Mutex
+	perCategoryPerReplica map[categoryAndReplica]*CategoryDownloader // 支持多category
 }
 
 type CategoryDownloader struct {
@@ -74,13 +79,13 @@ func NewCompClient(logger *log.Logger, st *State, wr DirectWriter, instanceName 
 	raw.Logger = logger
 
 	return &Client{
-		logger:       logger,
-		state:        st,
-		wr:           wr,
-		instanceName: instanceName,
-		httpCl:       httpCl,
-		r:            raw,
-		perCategory:  make(map[string]*CategoryDownloader),
+		logger:                logger,
+		state:                 st,
+		wr:                    wr,
+		instanceName:          instanceName,
+		httpCl:                httpCl,
+		r:                     raw,
+		perCategoryPerReplica: make(map[categoryAndReplica]*CategoryDownloader),
 	}
 }
 
@@ -109,9 +114,12 @@ func (c *Client) ackLoop(ctx context.Context) {
 
 // 1. 如果在 ack 前完成了chunk的下载，没问题
 // 2. 如果在 ack 完成后尝试下载chunk，下载请求将失败，因为该chunk在源中已不存在（已被ack）
-func (c *Client) ensureChunkIsNotBeingDownloaded(ch Chunk) {
+func (c *Client) ensureChunkIsNotBeingDownloaded(chunk Chunk) {
 	c.mu.Lock()
-	downloader, ok := c.perCategory[ch.Category]
+	downloader, ok := c.perCategoryPerReplica[categoryAndReplica{
+		category: chunk.Category,
+		replica:  chunk.Owner,
+	}]
 	c.mu.Unlock()
 	if !ok {
 		return
@@ -123,7 +131,7 @@ func (c *Client) ensureChunkIsNotBeingDownloaded(ch Chunk) {
 	doneCh := downloader.curChunkDone
 	downloader.curMu.Unlock()
 
-	if downloadedChunk.Category != ch.Category || downloadedChunk.FileName != ch.FileName || downloadedChunk.Owner != ch.Owner {
+	if downloadedChunk.Category != chunk.Category || downloadedChunk.FileName != chunk.FileName || downloadedChunk.Owner != chunk.Owner {
 		return
 	}
 	cancelFunc() // 取消下载
@@ -132,7 +140,12 @@ func (c *Client) ensureChunkIsNotBeingDownloaded(ch Chunk) {
 
 func (c *Client) replicationLoop(ctx context.Context) {
 	for chunk := range c.state.WatchReplicationQueue(ctx, c.instanceName) {
-		downloader, exist := c.perCategory[chunk.Category]
+		key := categoryAndReplica{
+			category: chunk.Category,
+			replica:  chunk.Owner,
+		}
+
+		downloader, exist := c.perCategoryPerReplica[key]
 		if !exist {
 			downloader = &CategoryDownloader{
 				logger:       c.logger,
@@ -146,7 +159,7 @@ func (c *Client) replicationLoop(ctx context.Context) {
 			go downloader.Loop(ctx)
 
 			c.mu.Lock()
-			c.perCategory[chunk.Category] = downloader
+			c.perCategoryPerReplica[key] = downloader
 			c.mu.Unlock()
 		}
 		downloader.eventsCh <- chunk
