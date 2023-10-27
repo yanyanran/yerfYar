@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yanyanran/yerfYar/generics/heap"
 	"github.com/yanyanran/yerfYar/protocol"
 	"io"
 	"log"
@@ -29,6 +30,19 @@ type downloadNotice struct {
 	size  uint64
 }
 
+type replicationSub struct {
+	chunk   string
+	size    uint64
+	channel chan bool
+}
+
+func (r replicationSub) Less(v replicationSub) bool {
+	if r.chunk == v.chunk {
+		return r.size < v.size
+	}
+	return r.chunk < v.chunk
+}
+
 type OnDisk struct {
 	logger *log.Logger
 
@@ -39,10 +53,9 @@ type OnDisk struct {
 
 	repl StorageHooks
 
-	downloadNoticeMu      sync.RWMutex
-	downloadNoticeChanIdx int
-	downloadNoticeChans   map[int]chan bool
-	downloadNoticeMap     map[string]*downloadNotice
+	downloadNoticeMu         sync.RWMutex
+	downloadNotificationSubs heap.Min[replicationSub]
+	downloadNoticeMap        map[string]*downloadNotice
 
 	writeMu                     sync.Mutex
 	lastChunkFp                 *os.File
@@ -57,14 +70,14 @@ type OnDisk struct {
 
 func NewOnDisk(logger *log.Logger, dirname, category, instanceName string, maxChunkSize uint64, rotateChunkInterval time.Duration, repl StorageHooks) (*OnDisk, error) {
 	s := &OnDisk{
-		logger:              logger,
-		dirname:             dirname,
-		category:            category,
-		instanceName:        instanceName,
-		repl:                repl,
-		maxChunkSize:        maxChunkSize,
-		downloadNoticeMap:   make(map[string]*downloadNotice),
-		downloadNoticeChans: make(map[int]chan bool),
+		logger:                   logger,
+		dirname:                  dirname,
+		category:                 category,
+		instanceName:             instanceName,
+		repl:                     repl,
+		maxChunkSize:             maxChunkSize,
+		downloadNoticeMap:        make(map[string]*downloadNotice),
+		downloadNotificationSubs: heap.NewMin[replicationSub](),
 	}
 
 	if err := s.initLastChunkIdx(dirname); err != nil {
@@ -213,25 +226,21 @@ func (s *OnDisk) Write(ctx context.Context, msgs []byte) (chunkName string, offs
 
 // Wait 等待直到minSyncReplicas报告成功下载了相应的chunk
 func (s *OnDisk) Wait(ctx context.Context, chunkName string, offset uint64, minSyncReplicas uint) error {
-	notifChan := make(chan bool, 2)
+	r := replicationSub{
+		chunk:   chunkName,
+		size:    offset,
+		channel: make(chan bool, 2),
+	}
 
 	s.downloadNoticeMu.Lock()
-	s.downloadNoticeChanIdx++
-	notifChanIdx := s.downloadNoticeChanIdx
-	s.downloadNoticeChans[notifChanIdx] = notifChan
+	s.downloadNotificationSubs.Push(r)
 	s.downloadNoticeMu.Unlock()
-
-	defer func() {
-		s.downloadNoticeMu.Lock()
-		delete(s.downloadNoticeChans, notifChanIdx) // TODO idx--
-		s.downloadNoticeMu.Unlock()
-	}()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-notifChan:
+		case <-r.channel:
 		}
 		var replicatedCount uint
 
@@ -376,13 +385,20 @@ func (s *OnDisk) ReplicationAck(ctx context.Context, chunk, instance string, siz
 		size:  size,
 	}
 
-	for _, noticeChans := range s.downloadNoticeChans {
-		select {
-		case noticeChans <- true:
-		default:
+	for s.downloadNotificationSubs.Len() > 0 {
+		r := s.downloadNotificationSubs.Pop()
+
+		// 等待ack对象版本比接收ack对象的版本高/= -> download成功
+		if (chunk == r.chunk && size >= r.size) || chunk > r.chunk {
+			select {
+			case r.channel <- true:
+			default:
+			}
+		} else {
+			s.downloadNotificationSubs.Push(r)
+			break
 		}
 	}
-
 	return nil
 }
 
