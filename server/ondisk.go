@@ -53,9 +53,11 @@ type OnDisk struct {
 
 	repl StorageHooks
 
-	downloadNoticeMu         sync.RWMutex
-	downloadNotificationSubs heap.Min[replicationSub]
-	downloadNoticeMap        map[string]*downloadNotice
+	downloadNoticeMu      sync.RWMutex
+	downloadNoticeChanIdx int
+	downloadNoticeChans   map[int]chan bool
+	downloadNoticeSubs    heap.Min[replicationSub]
+	downloadNoticeMap     map[string]*downloadNotice
 
 	writeMu                     sync.Mutex
 	lastChunkFp                 *os.File
@@ -70,14 +72,15 @@ type OnDisk struct {
 
 func NewOnDisk(logger *log.Logger, dirname, category, instanceName string, maxChunkSize uint64, rotateChunkInterval time.Duration, repl StorageHooks) (*OnDisk, error) {
 	s := &OnDisk{
-		logger:                   logger,
-		dirname:                  dirname,
-		category:                 category,
-		instanceName:             instanceName,
-		repl:                     repl,
-		maxChunkSize:             maxChunkSize,
-		downloadNoticeMap:        make(map[string]*downloadNotice),
-		downloadNotificationSubs: heap.NewMin[replicationSub](),
+		logger:              logger,
+		dirname:             dirname,
+		category:            category,
+		instanceName:        instanceName,
+		repl:                repl,
+		maxChunkSize:        maxChunkSize,
+		downloadNoticeMap:   make(map[string]*downloadNotice),
+		downloadNoticeChans: make(map[int]chan bool),
+		downloadNoticeSubs:  heap.NewMin[replicationSub](),
 	}
 
 	if err := s.initLastChunkIdx(dirname); err != nil {
@@ -204,6 +207,7 @@ func (s *OnDisk) Write(ctx context.Context, msgs []byte) (chunkName string, offs
 		if err := s.repl.AfterCreatingChunk(ctx, s.category, s.lastChunk); err != nil {
 			return "", 0, fmt.Errorf("创建新chunk后发生错误: %w", err)
 		}
+		s.lastChunkAddedToReplication = true
 	}
 
 	fp, err := s.getLastChunkFp()
@@ -212,35 +216,50 @@ func (s *OnDisk) Write(ctx context.Context, msgs []byte) (chunkName string, offs
 	}
 
 	n, err := fp.Write(msgs)
+	s.lastChunkSize += uint64(n)
 	if err != nil {
-		// 【回退机制】写入失败后尝试截断到原本chunk的大小来恢复
-		if truncateErr := fp.Truncate(int64(s.lastChunkSize)); truncateErr != nil {
-			s.logger.Printf("无法截断 %s: %v", fp.Name(), err)
-		}
 		return "", 0, err
 	}
-
-	s.lastChunkSize += uint64(n)
 	return s.lastChunk, int64(s.lastChunkSize), nil
 }
 
 // Wait 等待直到minSyncReplicas报告成功下载了相应的chunk
 func (s *OnDisk) Wait(ctx context.Context, chunkName string, offset uint64, minSyncReplicas uint) error {
-	r := replicationSub{
-		chunk:   chunkName,
-		size:    offset,
-		channel: make(chan bool, 2),
-	}
+	var channel chan bool
 
-	s.downloadNoticeMu.Lock()
-	s.downloadNotificationSubs.Push(r)
-	s.downloadNoticeMu.Unlock()
+	if minSyncReplicas == 1 {
+		r := replicationSub{
+			chunk:   chunkName,
+			size:    offset,
+			channel: make(chan bool, 2),
+		}
+
+		s.downloadNoticeMu.Lock()
+		s.downloadNoticeSubs.Push(r)
+		s.downloadNoticeMu.Unlock()
+
+		channel = r.channel
+	} else {
+		channel = make(chan bool, 2)
+
+		s.downloadNoticeMu.Lock()
+		s.downloadNoticeChanIdx++
+		notifChIdx := s.downloadNoticeChanIdx
+		s.downloadNoticeChans[notifChIdx] = channel
+		s.downloadNoticeMu.Unlock()
+
+		defer func() {
+			s.downloadNoticeMu.Lock()
+			delete(s.downloadNoticeChans, notifChIdx)
+			s.downloadNoticeMu.Unlock()
+		}()
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-r.channel:
+		case <-channel:
 		}
 		var replicatedCount uint
 
@@ -385,8 +404,15 @@ func (s *OnDisk) ReplicationAck(ctx context.Context, chunk, instance string, siz
 		size:  size,
 	}
 
-	for s.downloadNotificationSubs.Len() > 0 {
-		r := s.downloadNotificationSubs.Pop()
+	for _, ch := range s.downloadNoticeChans {
+		select {
+		case ch <- true:
+		default:
+		}
+	}
+
+	for s.downloadNoticeSubs.Len() > 0 {
+		r := s.downloadNoticeSubs.Pop()
 
 		// 等待ack对象版本比接收ack对象的版本高/= -> download成功
 		if (chunk == r.chunk && size >= r.size) || chunk > r.chunk {
@@ -395,7 +421,7 @@ func (s *OnDisk) ReplicationAck(ctx context.Context, chunk, instance string, siz
 			default:
 			}
 		} else {
-			s.downloadNotificationSubs.Push(r)
+			s.downloadNoticeSubs.Push(r)
 			break
 		}
 	}
