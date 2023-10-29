@@ -22,7 +22,7 @@ const DeletedSuffix = ".deleted"
 
 type StorageHooks interface {
 	AfterCreatingChunk(ctx context.Context, category string, fileName string) error
-	AfterAcknowledgeChunk(ctx context.Context, category string, fileName string) error
+	AfterAckChunk(ctx context.Context, category string, fileName string) error
 }
 
 type downloadNotice struct {
@@ -51,6 +51,8 @@ type OnDisk struct {
 	instanceName string
 	maxChunkSize uint64
 
+	replicationDisabled bool
+
 	repl StorageHooks
 
 	downloadNoticeMu      sync.RWMutex
@@ -68,6 +70,12 @@ type OnDisk struct {
 
 	fpsMu sync.Mutex
 	fps   map[string]*os.File // 缓存已打开的文件描述符，以便在需要读或写文件块时可快速访问
+}
+
+func (s *OnDisk) SetReplicationDisabled(v bool) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.replicationDisabled = v
 }
 
 func NewOnDisk(logger *log.Logger, dirname, category, instanceName string, maxChunkSize uint64, rotateChunkInterval time.Duration, repl StorageHooks) (*OnDisk, error) {
@@ -168,8 +176,10 @@ func (s *OnDisk) createNextChunk(ctx context.Context) error {
 	s.lastChunkIdx++
 	s.lastChunkAddedToReplication = false
 
-	if err := s.repl.AfterCreatingChunk(ctx, s.category, s.lastChunk); err != nil {
-		return fmt.Errorf("创建新chunk后发生错误: %w", err)
+	if !s.replicationDisabled {
+		if err := s.repl.AfterCreatingChunk(ctx, s.category, s.lastChunk); err != nil {
+			return fmt.Errorf("创建新chunk后发生错误: %w", err)
+		}
 	}
 
 	s.lastChunkAddedToReplication = true
@@ -203,7 +213,7 @@ func (s *OnDisk) Write(ctx context.Context, msgs []byte) (chunkName string, offs
 		}
 	}
 
-	if !s.lastChunkAddedToReplication {
+	if !s.lastChunkAddedToReplication && !s.replicationDisabled {
 		if err := s.repl.AfterCreatingChunk(ctx, s.category, s.lastChunk); err != nil {
 			return "", 0, fmt.Errorf("创建新chunk后发生错误: %w", err)
 		}
@@ -361,7 +371,7 @@ func (s *OnDisk) Ack(ctx context.Context, chunk string, size uint64) error {
 		return fmt.Errorf("ack %q: %v", chunk, err)
 	}
 
-	if err := s.repl.AfterAcknowledgeChunk(ctx, s.category, chunk); err != nil {
+	if err := s.repl.AfterAckChunk(ctx, s.category, chunk); err != nil {
 		s.logger.Printf("无法复制ack请求: %v", err)
 	}
 	return nil

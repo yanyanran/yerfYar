@@ -115,20 +115,9 @@ func WithPrefix() Option {
 	return Option(clientv3.WithPrefix())
 }
 
-func (c *State) AddChunkToReplicationQueue(ctx context.Context, targetInstance string, ch Chunk) error {
-	key := "replication/" + targetInstance + "/" + ch.Category + "/" + ch.FileName
-	return c.put(ctx, key, ch.Owner)
-}
-
 func (c *State) AddChunkToAckQueue(ctx context.Context, targetInstance string, ch Chunk) error {
 	key := "ack/" + targetInstance + "/" + ch.Category + "/" + ch.FileName
 	return c.put(ctx, key, ch.Owner)
-}
-
-func (c *State) DeleteChunkFromReplicationQueue(ctx context.Context, targetInstance string, ch Chunk) error {
-	key := "replication/" + targetInstance + "/" + ch.Category + "/" + ch.FileName
-	_, err := c.cl.Delete(ctx, c.prefix+key)
-	return err
 }
 
 func (c *State) DeleteChunkFromAckQueue(ctx context.Context, targetInstance string, ch Chunk) error {
@@ -148,11 +137,6 @@ func (c *State) parseReplicationKey(prefix string, kv *mvccpb.KeyValue) (Chunk, 
 		Category: parts[0],
 		FileName: parts[1],
 	}, nil
-}
-
-// WatchReplicationQueue 开始监视复制队列,并返回所有现有的chunk
-func (c *State) WatchReplicationQueue(ctx context.Context, instanceName string) chan Chunk {
-	return c.watchQueue(ctx, "replication", instanceName)
 }
 
 // WatchAckQueue 开始观察ack队列并返回所有现有chunk

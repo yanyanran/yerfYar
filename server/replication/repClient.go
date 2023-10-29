@@ -3,6 +3,7 @@ package replication
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/yanyanran/yerfYar/client"
@@ -43,11 +44,12 @@ type Client struct {
 
 	mu                    sync.Mutex
 	perCategoryPerReplica map[categoryAndReplica]*CategoryDownloader // 支持多category
+	peersAlreadyStarted   map[string]bool
 }
 
 type CategoryDownloader struct {
-	logger   *log.Logger
-	eventsCh chan Chunk
+	logger     *log.Logger
+	eventsChan chan Chunk
 
 	state        *State
 	wr           DirectWriter
@@ -67,6 +69,8 @@ type DirectWriter interface {
 	Stat(category string, fileName string) (size int64, exists bool, deleted bool, err error)
 	WriteDirect(category string, fileName string, contents []byte) error
 	AckDirect(ctx context.Context, category string, chunk string) error
+	SetReplicationDisabled(category string, v bool) error
+	Write(ctx context.Context, category string, msgs []byte) (chunkName string, off int64, err error)
 }
 
 // NewCompClient 初始化复制客户端
@@ -86,6 +90,7 @@ func NewCompClient(logger *log.Logger, st *State, wr DirectWriter, instanceName 
 		httpCl:                httpCl,
 		r:                     raw,
 		perCategoryPerReplica: make(map[categoryAndReplica]*CategoryDownloader),
+		peersAlreadyStarted:   make(map[string]bool),
 	}
 }
 
@@ -139,31 +144,98 @@ func (c *Client) ensureChunkIsNotBeingDownloaded(chunk Chunk) {
 }
 
 func (c *Client) replicationLoop(ctx context.Context) {
-	for chunk := range c.state.WatchReplicationQueue(ctx, c.instanceName) {
-		key := categoryAndReplica{
-			category: chunk.Category,
-			replica:  chunk.Owner,
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
-
-		downloader, exist := c.perCategoryPerReplica[key]
-		if !exist {
-			downloader = &CategoryDownloader{
-				logger:       c.logger,
-				eventsCh:     make(chan Chunk, 3),
-				state:        c.state,
-				wr:           c.wr,
-				instanceName: c.instanceName,
-				httpCl:       c.httpCl,
-				r:            c.r,
-			}
-			go downloader.Loop(ctx)
-
-			c.mu.Lock()
-			c.perCategoryPerReplica[key] = downloader
-			c.mu.Unlock()
+		peers, err := c.state.ListPeers(ctx)
+		if err != nil {
+			c.logger.Printf("[replicationLoop] 无法列出peers list: %v", err)
+			time.Sleep(10 * time.Second)
+			continue
 		}
-		downloader.eventsCh <- chunk
+		c.startPerPeerReplicationLoops(ctx, peers)
 	}
+}
+
+func (c *Client) startPerPeerReplicationLoops(ctx context.Context, peers []Peer) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, peer := range peers {
+		if peer.InstanceName == c.instanceName {
+			continue
+		} else if c.peersAlreadyStarted[peer.InstanceName] {
+			continue
+		}
+
+		c.peersAlreadyStarted[peer.InstanceName] = true
+		go c.downloadFromPeerLoop(ctx, peer)
+	}
+}
+
+// 用HTTP客户端从指定的peer上下载数据
+func (c *Client) downloadFromPeerLoop(ctx context.Context, p Peer) {
+	cl := client.NewSimple([]string{"http://" + p.ListenAddr})
+	cl.SetAck(false)
+	scratch := make([]byte, 256*1024)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		err := cl.Process(ctx, systemReplication, scratch, func(b []byte) error {
+			d := json.NewDecoder(bytes.NewReader(b))
+
+			for {
+				var ch Chunk
+				err := d.Decode(&ch)
+				if errors.Is(err, io.EOF) {
+					return nil
+				} else if err != nil {
+					c.logger.Printf("无法从systemReplication类别中解码chunk: %v", err)
+					continue
+				}
+				c.onNewChunkInReplicationQueue(ctx, ch)
+			}
+		})
+
+		if err != nil {
+			log.Printf("无法从类别 %q 获取事件: %v", systemReplication, err)
+			time.Sleep(10 * time.Second)
+		}
+	}
+}
+
+func (c *Client) onNewChunkInReplicationQueue(ctx context.Context, ch Chunk) {
+	key := categoryAndReplica{
+		category: ch.Category,
+		replica:  ch.Owner,
+	}
+
+	downloader, ok := c.perCategoryPerReplica[key]
+	if !ok {
+		downloader = &CategoryDownloader{
+			logger:       c.logger,
+			eventsChan:   make(chan Chunk, 3),
+			state:        c.state,
+			wr:           c.wr,
+			instanceName: c.instanceName,
+			httpCl:       c.httpCl,
+			r:            c.r,
+		}
+		go downloader.Loop(ctx)
+
+		c.mu.Lock()
+		c.perCategoryPerReplica[key] = downloader
+		c.mu.Unlock()
+	}
+
+	downloader.eventsChan <- ch
 }
 
 func (c *CategoryDownloader) Loop(ctx context.Context) {
@@ -171,13 +243,8 @@ func (c *CategoryDownloader) Loop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case ch := <-c.eventsCh:
+		case ch := <-c.eventsChan:
 			c.downloadAllChunksUpTo(ctx, ch)
-
-			// 下载chunk成功，从复制队列删除对应的数据块
-			if err := c.state.DeleteChunkFromReplicationQueue(ctx, c.instanceName, ch); err != nil {
-				log.Printf("无法从复制队列中删除chunk %+v: %v", ch, err)
-			}
 		}
 	}
 }
@@ -248,7 +315,6 @@ func (c *CategoryDownloader) downloadAllChunksUpToIteration(ctx context.Context,
 			})
 		}
 	}
-
 	return nil
 }
 
@@ -317,7 +383,7 @@ func (c *CategoryDownloader) downloadChunkIteration(ctx context.Context, ch Chun
 
 	info, err := c.getChunkInfo(ctx, addr, ch)
 	if err == errNotFound {
-		log.Printf("在 %q 找不到chunk", addr)
+		log.Printf("在 %q 找不到chunk %+v", ch, addr)
 		return nil
 	} else if err != nil {
 		return err

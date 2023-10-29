@@ -33,6 +33,7 @@ type Simple struct {
 	debug  bool
 	Logger *log.Logger
 
+	ack          bool
 	pollInterval time.Duration
 	addrs        []string
 	cl           *Raw
@@ -41,6 +42,7 @@ type Simple struct {
 
 func NewSimple(addrs []string) *Simple {
 	return &Simple{
+		ack:          true,
 		pollInterval: time.Millisecond * 100,
 		addrs:        addrs,
 		cl:           NewRaw(&http.Client{}),
@@ -60,6 +62,10 @@ func (s *Simple) SetDebug(v bool) {
 
 func (s *Simple) SetMinSyncReplicas(v uint) {
 	s.cl.SetMinSyncReplicas(v)
+}
+
+func (s *Simple) SetAck(v bool) {
+	s.ack = v
 }
 
 // MarshalState go-> json
@@ -208,8 +214,10 @@ func (s *Simple) processInstance(ctx context.Context, addr, instance, category s
 		return err
 	}
 
-	if err := s.cl.Ack(ctx, addr, category, curCh.CurChunk.Name, curCh.Offset); err != nil {
-		return fmt.Errorf("ack当前chunk发生错误: %w", err)
+	if s.ack {
+		if err := s.cl.Ack(ctx, addr, category, curCh.CurChunk.Name, curCh.Offset); err != nil {
+			return fmt.Errorf("ack当前chunk发生错误: %w", err)
+		}
 	}
 
 	if s.debug {

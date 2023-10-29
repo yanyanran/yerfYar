@@ -119,7 +119,7 @@ func (n *nilHooks) AfterCreatingChunk(ctx context.Context, category string, file
 	return nil
 }
 
-func (n *nilHooks) AfterAcknowledgeChunk(ctx context.Context, category string, fileName string) error {
+func (n *nilHooks) AfterAckChunk(ctx context.Context, category string, fileName string) error {
 	return nil
 }
 
