@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"github.com/phayes/freeport"
 	"github.com/yanyanran/yerfYar/client"
+	"github.com/yanyanran/yerfYar/server/replication"
 	"io/ioutil"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -51,45 +51,6 @@ func TestSimpleClientWithReplicationConcurrently(t *testing.T) {
 	simpleClientAndServerTest(t, true, true)
 }
 
-// 更细粒度的测试
-func runEtcd(t *testing.T) (etcdPort int) {
-	etcdPath, err := os.MkdirTemp(t.TempDir(), "etcd")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir for etcd: %v", err)
-	}
-
-	etcdPeerPort, err := freeport.GetFreePort()
-	if err != nil {
-		t.Fatalf("Failed to get free port for etcd peer: %v", err)
-	}
-
-	etcdPort, err = freeport.GetFreePort()
-	if err != nil {
-		t.Fatalf("Failed to get free port for etcd: %v", err)
-	}
-
-	etcdArgs := []string{"--data-dir", etcdPath,
-		"--listen-client-urls", fmt.Sprintf("http://localhost:%d", etcdPort),
-		"--advertise-client-urls", fmt.Sprintf("http://localhost:%d", etcdPort),
-		"--listen-peer-urls", fmt.Sprintf("http://localhost:%d", etcdPeerPort)}
-
-	log.Printf("Running `etcd %s`", strings.Join(etcdArgs, " "))
-
-	cmd := exec.Command("etcd", etcdArgs...)
-	cmd.Env = append(os.Environ(), "ETCD_UNSUPPORTED_ARCH=arm64")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Could not run etcd: %v", err)
-	}
-
-	t.Cleanup(func() { cmd.Process.Kill() })
-
-	log.Printf("Waiting for the port localhost:%d to open", etcdPort)
-
-	waitForPort(t, etcdPort, make(chan error, 1))
-
-	return etcdPort
-}
-
 type tweaks struct {
 	dbInitFn       func(t *testing.T, dbPath string)
 	modifyInitArgs func(t *testing.T, a *InitArgs)
@@ -125,9 +86,12 @@ func runYerfYar(t *testing.T, withReplica bool, w tweaks) (addrs []string, etcdA
 		w.dbInitFn(t, dbPath)
 	}
 
-	etcdAddr = fmt.Sprintf("http://localhost:%d/", runEtcd(t))
+	peers := []replication.Peer{
+		{InstanceName: "moscow", ListenAddr: fmt.Sprintf("127.0.0.1:%d", port1)},
+	}
 	ports := []int{port1}
 	if withReplica {
+		peers = append(peers, replication.Peer{InstanceName: "voronezh", ListenAddr: fmt.Sprintf("127.0.0.1:%d", port2)})
 		ports = append(ports, port2)
 	}
 
@@ -147,7 +111,7 @@ func runYerfYar(t *testing.T, withReplica bool, w tweaks) (addrs []string, etcdA
 		go func(port int) {
 			a := InitArgs{
 				LogWriter:           log.Default().Writer(),
-				EtcdAddr:            []string{etcdAddr},
+				Peers:               peers,
 				InstanceName:        instanceName,
 				ClusterName:         "testRussia",
 				DirName:             dirName,

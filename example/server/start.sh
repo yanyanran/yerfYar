@@ -19,7 +19,8 @@ scp ~/go/bin/yerfYar z:
 scp ~/go/bin/yerfYar g:
 scp ~/go/bin/linux_arm/yerfYar a:
 
-COMMON_PARAMS="-cluster AllComrads -rotate-chunk-interval=10s"
+PEERS="Moscow=127.0.0.1:8080,Voronezh=127.0.0.1:8081,Peking=127.0.0.1:8082,Bengaluru=127.0.0.1:8083,Phaenus=127.0.0.1:8084"
+COMMON_PARAMS="-cluster AllComrads -rotate-chunk-interval=10s -peers=$PEERS"
 
 # 所有节点都相等
 yerfYar $COMMON_PARAMS -dirname ~/yerfYar-data/moscow -instance Moscow -listen 127.0.0.1:8080 &

@@ -14,15 +14,13 @@ const systemAck = "_system-ack"
 type Storage struct {
 	logger          *log.Logger
 	dw              DirectWriter
-	client          *State
 	currentInstance string
 }
 
-func NewStorage(logger *log.Logger, dw DirectWriter, client *State, currentInstance string) *Storage {
+func NewStorage(logger *log.Logger, dw DirectWriter, currentInstance string) *Storage {
 	return &Storage{
 		logger:          logger,
 		dw:              dw,
-		client:          client,
 		currentInstance: currentInstance,
 	}
 }
@@ -51,9 +49,8 @@ func (s *Storage) AfterCreatingChunk(ctx context.Context, category string, fileN
 }
 
 func (s *Storage) AfterAckChunk(ctx context.Context, category string, fileName string) error {
-	peers, err := s.client.ListPeers(ctx)
-	if err != nil {
-		return fmt.Errorf("从 etcd 获取 peers: %v", err)
+	if err := s.dw.SetReplicationDisabled(systemAck, true); err != nil {
+		return fmt.Errorf("setting replication disabled: %v", err)
 	}
 
 	ch := Chunk{
@@ -70,16 +67,6 @@ func (s *Storage) AfterAckChunk(ctx context.Context, category string, fileName s
 
 	if _, _, err := s.dw.Write(ctx, systemAck, buf); err != nil {
 		return fmt.Errorf("将chunk写入系统 systemAck 类别: %v", err)
-	}
-
-	for _, p := range peers {
-		if p.InstanceName == s.currentInstance {
-			continue
-		}
-
-		if err := s.client.AddChunkToAckQueue(ctx, p.InstanceName, ch); err != nil {
-			return fmt.Errorf("无法写入%q（%q）的复制队列：%w", p.InstanceName, p.ListenAddr, err)
-		}
 	}
 	return nil
 }

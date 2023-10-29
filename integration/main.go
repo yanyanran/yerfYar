@@ -17,7 +17,7 @@ import (
 
 type InitArgs struct {
 	LogWriter io.Writer
-	EtcdAddr  []string
+	Peers     []replication.Peer
 
 	ClusterName  string
 	InstanceName string
@@ -46,21 +46,6 @@ type OnDiskCreator struct {
 func InitAndServe(a InitArgs) error {
 	logger := log.New(a.LogWriter, "["+a.InstanceName+"] ", log.LstdFlags|log.Lmicroseconds)
 
-	replState, err := replication.NewState(logger, a.EtcdAddr, a.ClusterName)
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-	defer cancel()
-
-	if err := replState.RegisterNewPeer(ctx, replication.Peer{
-		InstanceName: a.InstanceName,
-		ListenAddr:   a.ListenAddr,
-	}); err != nil {
-		return fmt.Errorf("无法在 etcd 中注册 peer 地址: %w", err)
-	}
-
 	filename := filepath.Join(a.DirName, "write_test")
 	fp, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0666)
 	if err != nil {
@@ -77,12 +62,12 @@ func InitAndServe(a InitArgs) error {
 		maxChunkSize:        a.MaxChunkSize,
 		rotateChunkInterval: a.RotateChunkInterval,
 	}
-	replStorage := replication.NewStorage(logger, creator, replState, a.InstanceName)
+	replStorage := replication.NewStorage(logger, creator, a.InstanceName)
 	creator.replStorage = replStorage
 
-	s := web.NewServer(logger, replState, a.InstanceName, a.DirName, a.ListenAddr, replStorage, creator.Get)
+	s := web.NewServer(logger, a.InstanceName, a.DirName, a.ListenAddr, replStorage, creator.Get)
 
-	replClient := replication.NewCompClient(logger, replState, creator, a.InstanceName)
+	replClient := replication.NewCompClient(logger, a.DirName, creator, a.Peers, a.InstanceName)
 	go replClient.Loop(context.Background(), a.DisableAck)
 
 	logger.Printf("Listening connections at %q", a.ListenAddr)

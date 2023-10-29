@@ -9,9 +9,12 @@ import (
 	"github.com/yanyanran/yerfYar/client"
 	"github.com/yanyanran/yerfYar/protocol"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
@@ -36,22 +39,24 @@ type categoryAndReplica struct {
 type Client struct {
 	logger *log.Logger
 
-	state        *State
+	dirname      string
+	peers        []Peer
 	wr           DirectWriter
 	instanceName string
 	httpCl       *http.Client
 	r            *client.Raw
 
-	mu                    sync.Mutex
-	perCategoryPerReplica map[categoryAndReplica]*CategoryDownloader // 支持多category
-	peersAlreadyStarted   map[string]bool
+	mu                     sync.Mutex
+	perCategoryPerReplica  map[categoryAndReplica]*CategoryDownloader // 支持多category
+	peersAlreadyStarted    map[string]bool
+	ackPeersAlreadyStarted map[string]bool
 }
 
 type CategoryDownloader struct {
 	logger     *log.Logger
 	eventsChan chan Chunk
 
-	state        *State
+	peers        []Peer
 	wr           DirectWriter
 	instanceName string
 	httpCl       *http.Client
@@ -74,7 +79,7 @@ type DirectWriter interface {
 }
 
 // NewCompClient 初始化复制客户端
-func NewCompClient(logger *log.Logger, st *State, wr DirectWriter, instanceName string) *Client {
+func NewCompClient(logger *log.Logger, dirname string, wr DirectWriter, peers []Peer, instanceName string) *Client {
 	httpCl := &http.Client{
 		Timeout: defaultClientTimeout,
 	}
@@ -83,38 +88,24 @@ func NewCompClient(logger *log.Logger, st *State, wr DirectWriter, instanceName 
 	raw.Logger = logger
 
 	return &Client{
-		logger:                logger,
-		state:                 st,
-		wr:                    wr,
-		instanceName:          instanceName,
-		httpCl:                httpCl,
-		r:                     raw,
-		perCategoryPerReplica: make(map[categoryAndReplica]*CategoryDownloader),
-		peersAlreadyStarted:   make(map[string]bool),
+		logger:                 logger,
+		dirname:                dirname,
+		wr:                     wr,
+		instanceName:           instanceName,
+		httpCl:                 httpCl,
+		r:                      raw,
+		peers:                  peers,
+		perCategoryPerReplica:  make(map[categoryAndReplica]*CategoryDownloader),
+		peersAlreadyStarted:    make(map[string]bool),
+		ackPeersAlreadyStarted: make(map[string]bool),
 	}
 }
 
 func (c *Client) Loop(ctx context.Context, disableAcknowledge bool) {
 	if !disableAcknowledge {
-		go c.ackLoop(ctx)
+		go c.replicationLoop(ctx, systemAck, c.ackPeersAlreadyStarted, c.onNewChunkInAckQueue)
 	}
-	c.replicationLoop(ctx)
-}
-
-func (c *Client) ackLoop(ctx context.Context) {
-	for ch := range c.state.WatchAckQueue(ctx, c.instanceName) {
-		c.logger.Printf("ack chunk %+v", ch)
-
-		c.ensureChunkIsNotBeingDownloaded(ch)
-
-		if err := c.wr.AckDirect(ctx, ch.Category, ch.FileName); err != nil {
-			c.logger.Printf("无法从ack队列确认chunk %+v: %v", ch, err)
-		}
-
-		if err := c.state.DeleteChunkFromAckQueue(ctx, c.instanceName, ch); err != nil {
-			c.logger.Printf("无法从ack队列中删除chunk %+v： %v", ch, err)
-		}
-	}
+	c.replicationLoop(ctx, systemReplication, c.peersAlreadyStarted, c.onNewChunkInReplicationQueue)
 }
 
 // 1. 如果在 ack 前完成了chunk的下载，没问题
@@ -143,43 +134,58 @@ func (c *Client) ensureChunkIsNotBeingDownloaded(chunk Chunk) {
 	<-doneCh     // 等待下载完成
 }
 
-func (c *Client) replicationLoop(ctx context.Context) {
+func (c *Client) replicationLoop(ctx context.Context, category string, alreadyStarted map[string]bool, onChunk func(context.Context, Chunk)) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		peers, err := c.state.ListPeers(ctx)
-		if err != nil {
-			c.logger.Printf("[replicationLoop] 无法列出peers list: %v", err)
-			time.Sleep(10 * time.Second)
-			continue
-		}
-		c.startPerPeerReplicationLoops(ctx, peers)
+
+		c.startPerPeerLoops(ctx, category, c.peers, alreadyStarted, onChunk)
 	}
 }
 
-func (c *Client) startPerPeerReplicationLoops(ctx context.Context, peers []Peer) {
+func (c *Client) onNewChunkInAckQueue(ctx context.Context, ch Chunk) {
+	c.logger.Printf("acknowledging chunk %+v", ch)
+
+	c.ensureChunkIsNotBeingDownloaded(ch)
+
+	// TODO: handle errors better
+	if err := c.wr.AckDirect(ctx, ch.Category, ch.FileName); err != nil {
+		c.logger.Printf("Could not ack chunk %+v from the acknowledge queue: %v", ch, err)
+	}
+}
+
+func (c *Client) startPerPeerLoops(ctx context.Context, category string, peers []Peer, alreadyStarted map[string]bool, onChunk func(context.Context, Chunk)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	for _, peer := range peers {
 		if peer.InstanceName == c.instanceName {
 			continue
-		} else if c.peersAlreadyStarted[peer.InstanceName] {
+		} else if alreadyStarted[peer.InstanceName] {
 			continue
 		}
 
-		c.peersAlreadyStarted[peer.InstanceName] = true
-		go c.downloadFromPeerLoop(ctx, peer)
+		alreadyStarted[peer.InstanceName] = true
+		go c.perPeerLoop(ctx, category, peer, onChunk)
 	}
 }
 
 // 用HTTP客户端从指定的peer上下载数据
-func (c *Client) downloadFromPeerLoop(ctx context.Context, p Peer) {
+func (c *Client) perPeerLoop(ctx context.Context, category string, p Peer, onChunk func(context.Context, Chunk)) {
 	cl := client.NewSimple([]string{"http://" + p.ListenAddr})
 	cl.SetAck(false)
+
+	stateFilePath := filepath.Join(c.dirname, category+"-"+p.InstanceName+"-state.json")
+	stateContents, err := ioutil.ReadFile(stateFilePath)
+	if err == nil {
+		cl.RestoreSavedState(stateContents)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		c.logger.Printf("Could not read state file %s: %v", stateFilePath, err)
+	}
+
 	scratch := make([]byte, 256*1024)
 
 	for {
@@ -188,7 +194,7 @@ func (c *Client) downloadFromPeerLoop(ctx context.Context, p Peer) {
 			return
 		default:
 		}
-		err := cl.Process(ctx, systemReplication, scratch, func(b []byte) error {
+		err := cl.Process(ctx, category, scratch, func(b []byte) error {
 			d := json.NewDecoder(bytes.NewReader(b))
 
 			for {
@@ -197,15 +203,29 @@ func (c *Client) downloadFromPeerLoop(ctx context.Context, p Peer) {
 				if errors.Is(err, io.EOF) {
 					return nil
 				} else if err != nil {
-					c.logger.Printf("无法从systemReplication类别中解码chunk: %v", err)
+					c.logger.Printf("Failed to decode chunk from category %q: %v", category, err)
 					continue
 				}
-				c.onNewChunkInReplicationQueue(ctx, ch)
+
+				onChunk(ctx, ch)
+
+				stateContents, err := cl.MarshalState()
+				if err != nil {
+					c.logger.Printf("Could not marshal client state: %v", err)
+					continue
+				}
+				if err := ioutil.WriteFile(stateFilePath+".tmp", stateContents, 0666); err != nil {
+					c.logger.Printf("Could not write state file %q: %v", stateFilePath+".tmp", err)
+				}
+
+				if err := os.Rename(stateFilePath+".tmp", stateFilePath); err != nil {
+					c.logger.Printf("Could not rename state file %q: %v", stateFilePath, err)
+				}
 			}
 		})
 
 		if err != nil {
-			log.Printf("无法从类别 %q 获取事件: %v", systemReplication, err)
+			log.Printf("无法从类别 %q 获取事件: %v", category, err)
 			time.Sleep(10 * time.Second)
 		}
 	}
@@ -222,7 +242,7 @@ func (c *Client) onNewChunkInReplicationQueue(ctx context.Context, ch Chunk) {
 		downloader = &CategoryDownloader{
 			logger:       c.logger,
 			eventsChan:   make(chan Chunk, 3),
-			state:        c.state,
+			peers:        c.peers,
 			wr:           c.wr,
 			instanceName: c.instanceName,
 			httpCl:       c.httpCl,
@@ -422,13 +442,8 @@ func (c *CategoryDownloader) downloadChunkIteration(ctx context.Context, ch Chun
 }
 
 func (c *CategoryDownloader) listenAddrForChunk(ctx context.Context, ch Chunk) (string, error) {
-	peers, err := c.state.ListPeers(ctx)
-	if err != nil {
-		return "", err
-	}
-
 	var addr string
-	for _, p := range peers {
+	for _, p := range c.peers {
 		if p.InstanceName == ch.Owner {
 			addr = p.ListenAddr
 			break
